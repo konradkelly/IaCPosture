@@ -1,0 +1,82 @@
+{
+  "pr_id": "fixture-ssh-after",
+  "finding_count": 4,
+  "findings": [
+    {
+      "pk": "PR#fixture-ssh-after",
+      "sk": "FINDING#73328b0ebaa00522",
+      "finding_id": "73328b0ebaa00522",
+      "iac_type": "terraform",
+      "source": "tfsec",
+      "rule_id": "aws-ec2-add-description-to-security-group",
+      "file": "main.tf",
+      "line_range": [
+        1,
+        10
+      ],
+      "severity": "LOW",
+      "control_mappings": [],
+      "status": "raw",
+      "proposed_fix": null,
+      "created_at": "2026-09-01T19:25:00.779346+00:00",
+      "updated_at": "2026-09-01T19:25:00.779346+00:00"
+    },
+    {
+      "pk": "PR#fixture-ssh-after",
+      "sk": "FINDING#77b223ebf4d497bc",
+      "finding_id": "77b223ebf4d497bc",
+      "iac_type": "terraform",
+      "source": "tfsec",
+      "rule_id": "aws-ec2-add-description-to-security-group-rule",
+      "file": "main.tf",
+      "line_range": [
+        4,
+        9
+      ],
+      "severity": "LOW",
+      "control_mappings": [],
+      "status": "raw",
+      "proposed_fix": null,
+      "created_at": "2026-09-01T19:25:00.779346+00:00",
+      "updated_at": "2026-09-01T19:25:00.779346+00:00"
+    },
+    {
+      "pk": "PR#fixture-ssh-after",
+      "sk": "FINDING#48c47385320f16e7",
+      "finding_id": "48c47385320f16e7",
+      "iac_type": "terraform",
+      "source": "checkov",
+      "rule_id": "CKV_AWS_23",
+      "file": "main.tf",
+      "line_range": [
+        1,
+        10
+      ],
+      "severity": "UNKNOWN",
+      "control_mappings": [],
+      "status": "raw",
+      "proposed_fix": null,
+      "created_at": "2026-09-01T19:25:00.779417+00:00",
+      "updated_at": "2026-09-01T19:25:00.779417+00:00"
+    },
+    {
+      "pk": "PR#fixture-ssh-after",
+      "sk": "FINDING#961a19d93727fa01",
+      "finding_id": "961a19d93727fa01",
+      "iac_type": "terraform",
+      "source": "checkov",
+      "rule_id": "CKV2_AWS_5",
+      "file": "main.tf",
+      "line_range": [
+        1,
+        10
+      ],
+      "severity": "UNKNOWN",
+      "control_mappings": [],
+      "status": "raw",
+      "proposed_fix": null,
+      "created_at": "2026-09-01T19:25:00.779417+00:00",
+      "updated_at": "2026-09-01T19:25:00.779417+00:00"
+    }
+  ]
+}
