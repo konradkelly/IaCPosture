@@ -12,6 +12,10 @@ Event shape:
   "iac_type": "terraform",
   "persist": true                    # optional, default true
 }
+
+Each returned finding's "file" is relative to s3_prefix (e.g. "main.tf"), not
+a local /tmp path -- callers can reconstruct the object's S3 key as
+f"{s3_prefix}{finding['file']}".
 """
 
 import hashlib
@@ -64,7 +68,7 @@ def handler(event, context):
         tfsec_results = _run_tfsec(work_dir)
         checkov_report = _run_checkov(work_dir)
 
-        findings = _normalize_tfsec(tfsec_results, pr_id) + _normalize_checkov(checkov_report, pr_id)
+        findings = _normalize_tfsec(tfsec_results, pr_id, work_dir) + _normalize_checkov(checkov_report, pr_id)
 
         if persist:
             _write_findings(findings)
@@ -126,7 +130,14 @@ def _run_checkov(work_dir):
     return json.loads(proc.stdout)
 
 
-def _normalize_tfsec(results, pr_id):
+def _relativize_tfsec_path(file_path, work_dir):
+    prefix = work_dir.rstrip("/") + "/"
+    if file_path.startswith(prefix):
+        return file_path[len(prefix):]
+    return file_path.lstrip("/")
+
+
+def _normalize_tfsec(results, pr_id, work_dir):
     now = datetime.now(timezone.utc).isoformat()
     findings = []
     for r in results:
@@ -135,7 +146,8 @@ def _normalize_tfsec(results, pr_id):
             pr_id=pr_id,
             source="tfsec",
             rule_id=r.get("long_id") or r.get("rule_id", "unknown"),
-            file_path=location.get("filename", ""),
+            # tfsec reports the full local path it was invoked with (work_dir/main.tf).
+            file_path=_relativize_tfsec_path(location.get("filename", ""), work_dir),
             line_range=[location.get("start_line"), location.get("end_line")],
             severity=(r.get("severity") or "UNKNOWN").upper(),
             now=now,
@@ -152,7 +164,8 @@ def _normalize_checkov(report, pr_id):
             pr_id=pr_id,
             source="checkov",
             rule_id=c.get("check_id", "unknown"),
-            file_path=c.get("file_path", ""),
+            # checkov reports paths root-relative to the scanned dir (/main.tf).
+            file_path=c.get("file_path", "").lstrip("/"),
             line_range=list(c.get("file_line_range") or [None, None]),
             severity=(c.get("severity") or "UNKNOWN").upper(),
             now=now,
