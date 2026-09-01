@@ -30,3 +30,11 @@ output "terraform_scanner_function_name" {
 output "terraform_scanner_function_arn" {
   value = aws_lambda_function.terraform_scanner.arn
 }
+
+output "mapping_agent_function_name" {
+  value = aws_lambda_function.mapping_agent.function_name
+}
+
+output "mapping_agent_function_arn" {
+  value = aws_lambda_function.mapping_agent.arn
+}
