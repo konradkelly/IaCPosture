@@ -43,9 +43,26 @@ data "aws_iam_policy_document" "terraform_scanner" {
     resources = ["${aws_s3_bucket.artifacts.arn}/scans/*"]
   }
 
+  # ListObjectsV2 (used to enumerate a scan's .tf files by prefix) is a
+  # bucket-level action -- it must target the bucket ARN itself, not an
+  # object path, so it can't be folded into ScanArtifactsReadWrite above.
   statement {
-    sid       = "FindingsReadWrite"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query"]
+    sid       = "ScanArtifactsList"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.artifacts.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["scans/*"]
+    }
+  }
+
+  statement {
+    sid = "FindingsReadWrite"
+    # BatchWriteItem is what boto3's Table.batch_writer() actually calls under
+    # the hood -- easy to miss since the handler code only mentions put_item.
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:BatchWriteItem"]
     resources = [aws_dynamodb_table.findings.arn]
   }
 }

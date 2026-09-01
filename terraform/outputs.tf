@@ -22,3 +22,11 @@ output "lambda_role_arns" {
     review_api        = aws_iam_role.review_api.arn
   }
 }
+
+output "terraform_scanner_function_name" {
+  value = aws_lambda_function.terraform_scanner.function_name
+}
+
+output "terraform_scanner_function_arn" {
+  value = aws_lambda_function.terraform_scanner.arn
+}
