@@ -1,0 +1,17 @@
+{
+  "framework": "OWASP-CICD-Top10",
+  "framework_name": "OWASP Top 10 CI/CD Security Risks",
+  "source": "https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+  "controls": [
+    {
+      "control_id": "CICD-SEC-6",
+      "title": "Insufficient Credential Hygiene",
+      "text": "Credentials used by pipelines and infrastructure code should be short-lived and scoped to least privilege, and never hardcoded in source; rotate and revoke them promptly if exposed."
+    },
+    {
+      "control_id": "CICD-SEC-9",
+      "title": "Improper Artifact Integrity Validation",
+      "text": "Pipelines and IaC definitions that pull external modules, images, or packages should pin to an exact, verified version and validate integrity before use, rather than trusting a mutable reference."
+    }
+  ]
+}

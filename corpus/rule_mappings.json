@@ -1,0 +1,32 @@
+{
+  "_comment": "Maps a scanner finding's (source, rule_id) to candidate controls in frameworks/*.json. mapping-agent uses this as a deterministic first pass -- it looks up candidates here, pulls their text from S3, and only asks the LLM to pick/cite/explain among those candidates rather than freely guessing a control_id. Entries are grounded in rule_ids actually observed from lambda/terraform-scanner/fixtures/vulnerable-sample; extend as new rule_ids show up in real scans rather than guessing ahead of evidence. A rule with no confident mapping (e.g. pure hygiene checks like missing descriptions) is deliberately left out rather than force-mapped.",
+  "mappings": {
+    "tfsec:aws-ec2-no-public-ingress-sgr": [
+      { "framework": "CIS-AWS-1.4", "control_id": "5.2" }
+    ],
+    "tfsec:aws-s3-block-public-acls": [
+      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
+    ],
+    "tfsec:aws-s3-block-public-policy": [
+      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
+    ],
+    "tfsec:aws-s3-enable-bucket-encryption": [
+      { "framework": "CIS-AWS-1.4", "control_id": "2.1.1" }
+    ],
+    "tfsec:aws-s3-enable-bucket-logging": [
+      { "framework": "CIS-AWS-1.4", "control_id": "3.6" }
+    ],
+    "checkov:CKV_AWS_24": [
+      { "framework": "CIS-AWS-1.4", "control_id": "5.2" }
+    ],
+    "checkov:CKV_AWS_18": [
+      { "framework": "CIS-AWS-1.4", "control_id": "3.6" }
+    ],
+    "checkov:CKV_AWS_145": [
+      { "framework": "CIS-AWS-1.4", "control_id": "2.1.1" }
+    ],
+    "checkov:CKV2_AWS_6": [
+      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
+    ]
+  }
+}

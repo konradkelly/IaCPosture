@@ -1,0 +1,52 @@
+{
+  "framework": "CIS-AWS-1.4",
+  "framework_name": "CIS Amazon Web Services Foundations Benchmark v1.4.0",
+  "source": "https://docs.aws.amazon.com/config/latest/developerguide/operational-best-practices-for-cis_aws_benchmark_level_1.html",
+  "controls": [
+    {
+      "control_id": "1.16",
+      "title": "IAM policies that allow full \"*:*\" administrative privileges are not attached",
+      "text": "IAM policies must not grant \"Effect\": \"Allow\" with \"Action\": \"*\" over \"Resource\": \"*\"; scope permissions to what a role or user actually needs."
+    },
+    {
+      "control_id": "2.1.1",
+      "title": "S3 buckets employ encryption at rest",
+      "text": "Every S3 bucket should have default server-side encryption enabled so objects are encrypted at rest without depending on each uploader to set it."
+    },
+    {
+      "control_id": "2.1.2",
+      "title": "S3 bucket policy allows only HTTPS requests",
+      "text": "S3 bucket policies should explicitly deny non-HTTPS requests so data in transit to and from the bucket is always encrypted."
+    },
+    {
+      "control_id": "2.1.5",
+      "title": "S3 buckets are configured with 'Block public access (bucket settings)'",
+      "text": "All four S3 Block Public Access settings (block public ACLs, block public policy, ignore public ACLs, restrict public buckets) should be enabled unless a bucket is deliberately public."
+    },
+    {
+      "control_id": "2.2.1",
+      "title": "EBS volume encryption is enabled",
+      "text": "EBS volumes should be encrypted at rest, ideally via account-level default EBS encryption rather than relying on each volume being created correctly."
+    },
+    {
+      "control_id": "2.3.1",
+      "title": "Encryption is enabled for RDS instances",
+      "text": "RDS instances and their storage should have encryption at rest enabled at creation time, since it cannot be enabled retroactively without a snapshot-and-restore."
+    },
+    {
+      "control_id": "3.6",
+      "title": "S3 bucket access logging is enabled",
+      "text": "S3 buckets should have server access logging enabled so requests against the bucket are recorded for later security investigation."
+    },
+    {
+      "control_id": "5.1",
+      "title": "No Network ACLs allow ingress from 0.0.0.0/0 to remote server administration ports",
+      "text": "Network ACLs should not permit inbound traffic from 0.0.0.0/0 to remote administration ports such as 22 (SSH) or 3389 (RDP)."
+    },
+    {
+      "control_id": "5.2",
+      "title": "No security groups allow ingress from 0.0.0.0/0 to remote server administration ports",
+      "text": "Security groups should not permit inbound traffic from 0.0.0.0/0 to remote administration ports such as 22 (SSH) or 3389 (RDP); restrict to known source ranges."
+    }
+  ]
+}

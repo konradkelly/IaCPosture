@@ -1,0 +1,27 @@
+{
+  "framework": "OWASP-CloudNative",
+  "framework_name": "OWASP Cloud-Native Application Security Top 10",
+  "source": "https://nest.owasp.org/projects/cloud-native-application-security-top-10",
+  "controls": [
+    {
+      "control_id": "CNAS-1",
+      "title": "Insecure cloud, container or orchestration configuration",
+      "text": "Cloud resources should be provisioned with secure-by-default configuration rather than relying on a platform's permissive defaults, since a single misconfigured resource can expose an entire environment."
+    },
+    {
+      "control_id": "CNAS-4",
+      "title": "CI/CD pipeline and software supply chain flaws",
+      "text": "Third-party Terraform modules and container images referenced by IaC should be pinned to a specific, verified version rather than trusting a mutable reference like a branch or 'latest' tag."
+    },
+    {
+      "control_id": "CNAS-5",
+      "title": "Insecure secrets storage",
+      "text": "Credentials, API keys, and other secrets must never be stored in plaintext in source code, configuration files, or version control history."
+    },
+    {
+      "control_id": "CNAS-6",
+      "title": "Over-permissive or insecure network policies",
+      "text": "Network access controls (security groups, NACLs, firewall rules) should default to deny and only permit the specific traffic a workload requires."
+    }
+  ]
+}
