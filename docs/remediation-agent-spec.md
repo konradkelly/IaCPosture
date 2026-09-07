@@ -1,0 +1,139 @@
+# remediation-agent — build brief
+
+I'm building `remediation-agent`, one Lambda in a serverless AppSec
+pipeline (`terraform-scanner` and `mapping-agent` are already built and
+deployed by a teammate). Here's the full contract to build against — no
+AWS credentials needed, everything below is designed to be built and
+tested locally against mocks/fixtures.
+
+**The job**: for each finding with `status: "mapped"` in DynamoDB, draft a
+fix via the Anthropic API, then *prove it works* by re-scanning the
+patched file with the already-deployed `terraform-scanner` Lambda, before
+ever showing it to a human. `self_check_passed` must be computed in code
+from that re-scan — never asserted by the LLM. This is the project's core
+integrity guarantee.
+
+On success, `status` becomes `fix-proposed`. If self-check fails (issue
+not cleared, or a new one introduced), `status` becomes `needs-human-only`
+— still surfaced to a reviewer, just without a diff attached.
+
+## Invocation contract
+
+Matches the convention used by the other two Lambdas:
+
+```json
+{ "pr_id": "manual-test-1" }
+```
+
+## Processing steps
+
+1. Query DynamoDB for findings under `pk = PR#<pr_id>`, `status = "mapped"`.
+2. For each finding, fetch the original file from
+   `s3://<ARTIFACTS_BUCKET>/scans/<pr_id>/<finding.file>`. `finding.file`
+   is a path relative to the scan prefix (e.g. `"main.tf"`) — this was
+   recently fixed on the deployed scanner (it used to be a broken
+   ephemeral `/tmp` path), so make sure you're working from the latest
+   `terraform-scanner/handler.py`.
+3. Call the Anthropic API for a **complete corrected version of the
+   file** — not a hand-written diff. Use `output_config.format` with a
+   JSON schema for `{corrected_file_content, rationale}`
+   (schema-guaranteed JSON, no free-text parsing — see
+   `mapping-agent/handler.py` for the exact pattern: Secrets Manager
+   fetch-and-cache, `output_config.format` usage).
+4. Compute the unified diff yourself in code, via Python's
+   `difflib.unified_diff`, between the original and corrected content.
+   Don't ask the LLM to author the diff directly — a hand-authored diff
+   risks not applying cleanly (wrong line numbers/context); a
+   mechanically computed one always will.
+5. Upload the corrected content to a scratch location:
+   `scans/<pr_id>/self-check-<finding_id>/main.tf` (must stay under the
+   `scans/` prefix — that's what's IAM-permitted, see below).
+6. Invoke `terraform-scanner` synchronously (`lambda:InvokeFunction`) with:
+   ```json
+   {
+     "pr_id": "<pr_id>-self-check-<finding_id>",
+     "s3_prefix": "scans/<pr_id>/self-check-<finding_id>/",
+     "iac_type": "terraform",
+     "persist": false
+   }
+   ```
+   `persist: false` means this re-scan's findings come back to you in the
+   response but are never written to DynamoDB — this mode already exists
+   on the deployed function.
+7. Compute `self_check_passed` in code:
+   - **Cleared**: no finding in the re-scan matches the original finding's
+     `(source, rule_id)`.
+   - **No new findings**: every `(source, rule_id)` in the re-scan was
+     already present in the baseline scan of this PR/file (query DynamoDB
+     for the PR's other findings on the same file to build that baseline
+     — don't just check against zero).
+   - `self_check_passed = cleared AND no_new_findings`.
+8. Write the result back:
+   ```python
+   table.update_item(
+       Key={"pk": finding["pk"], "sk": finding["sk"]},
+       UpdateExpression="SET proposed_fix = :pf, #status = :status, updated_at = :now",
+       ExpressionAttributeNames={"#status": "status"},
+       ExpressionAttributeValues={
+           ":pf": {
+               "diff": diff_text,
+               "rationale": rationale,
+               "self_check_passed": self_check_passed,
+               "self_check_new_findings": self_check_new_findings,
+           },
+           ":status": "fix-proposed" if self_check_passed else "needs-human-only",
+           ":now": now_iso,
+       },
+   )
+   ```
+
+## Env vars
+
+Your `handler.py` should read these via `os.environ` (matching the other
+two Lambdas' convention — you won't have real values locally since you're
+mocking AWS calls, you just need the names): `DYNAMODB_TABLE`,
+`ARTIFACTS_BUCKET`, `ANTHROPIC_SECRET_ARN`, `ANTHROPIC_MODEL`.
+
+## IAM — already granted on your execution role, nothing to request
+
+| Permission | Scope |
+|---|---|
+| `logs:CreateLogGroup/CreateLogStream/PutLogEvents` | own log group |
+| `dynamodb:GetItem/PutItem/UpdateItem/Query` | the findings table |
+| `secretsmanager:GetSecretValue` | the Anthropic API key secret |
+| `lambda:InvokeFunction` | `terraform-scanner`'s function ARN specifically |
+| `s3:GetObject`, `s3:PutObject` | `scans/*` prefix only |
+
+Two gaps to design around rather than assume are covered — both bit the
+`terraform-scanner` build already:
+
+- **No `s3:ListBucket`.** If you ever list objects under a prefix
+  (`list_objects_v2`/paginator) rather than fetching an exact known key,
+  you'll get `AccessDenied` — it's a separate bucket-level grant from
+  `GetObject`. The flow above only ever reads a known key, so you likely
+  won't need it.
+- **No `dynamodb:BatchWriteItem`.** boto3's `Table.batch_writer()` calls
+  this under the hood, not `PutItem`. Use `update_item`/`put_item`
+  directly (already covered), or flag if you need batch writes.
+
+## Model
+
+Default `claude-opus-5`. Diff drafting is a harder task than
+mapping-agent's classification step, so this is a more defensible default
+here than it was there — but expose it as an overridable
+variable/env var rather than hardcoding, same pattern as
+`mapping_agent_model` in the Terraform.
+
+## Testing — no AWS needed
+
+`lambda/remediation-agent/fixtures/` has two before/after `.tf` pairs
+(`s3-bucket-encryption/`, `open-ssh-ingress/`), each with a
+`scan-response.json` per side that is **real captured output** from
+actually invoking the deployed `terraform-scanner` — not hand-written, so
+it's guaranteed accurate. Mock your Lambda's invoke call to
+`terraform-scanner` to return the appropriate fixture response given the
+S3 prefix you pass it, and use these to test the self-check comparison
+logic in step 7 above. Both fixtures are "clean fix" cases
+(`self_check_passed` should end up `True`, `self_check_new_findings`
+empty) — there's no failure-path fixture yet, add one if you want to test
+that branch too. README in that folder has more detail.
