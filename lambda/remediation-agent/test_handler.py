@@ -248,6 +248,147 @@ def test_a_suppressing_fix_is_rejected_before_it_is_ever_scanned(
     assert written[":pf"]["suppression_attempt"]
 
 
+# ---------- deletion gate ----------
+
+# Reduced from PugetScope's modules/security_groups/main.tf.
+SG_ORIGINAL = '''
+resource "aws_security_group" "k8s_nodes" {
+  name_prefix = "pugetscope-k8s-nodes-"
+}
+
+resource "aws_security_group_rule" "http_from_internet" {
+  type        = "ingress"
+  from_port   = 80
+  cidr_blocks = ["0.0.0.0/0"]
+}
+
+resource "aws_security_group_rule" "nodeport_from_internet" {
+  type        = "ingress"
+  from_port   = 30000
+  cidr_blocks = ["0.0.0.0/0"]
+}
+'''
+
+
+def test_deleting_a_resource_is_reported():
+    """The real port-80 failure: the rule was removed outright, which scans
+    clean because the thing that raised the finding is gone."""
+    corrected = SG_ORIGINAL.replace('''resource "aws_security_group_rule" "http_from_internet" {
+  type        = "ingress"
+  from_port   = 80
+  cidr_blocks = ["0.0.0.0/0"]
+}
+''', "# Plaintext HTTP is not exposed.\n")
+
+    assert handler._find_dropped_resources(SG_ORIGINAL, corrected) == [
+        "aws_security_group_rule.http_from_internet"
+    ]
+
+
+def test_renaming_a_resource_is_not_treated_as_a_deletion():
+    """The real NodePort fix renamed nodeport_from_internet ->
+    nodeport_from_admin while rescoping its CIDR. That is a delete plus an add
+    in diff terms, but nothing was actually dropped."""
+    corrected = SG_ORIGINAL.replace(
+        '"nodeport_from_internet"', '"nodeport_from_admin"'
+    ).replace('from_port   = 30000\n  cidr_blocks = ["0.0.0.0/0"]',
+              'from_port   = 30000\n  cidr_blocks = var.admin_cidrs')
+
+    assert handler._find_dropped_resources(SG_ORIGINAL, corrected) == []
+
+
+def test_tightening_a_resource_in_place_is_not_a_deletion():
+    corrected = SG_ORIGINAL.replace('cidr_blocks = ["0.0.0.0/0"]', 'cidr_blocks = ["10.0.0.0/8"]')
+
+    assert handler._find_dropped_resources(SG_ORIGINAL, corrected) == []
+
+
+def test_adding_a_resource_is_not_a_deletion():
+    corrected = SG_ORIGINAL + '\nresource "aws_flow_log" "vpc" {\n}\n'
+
+    assert handler._find_dropped_resources(SG_ORIGINAL, corrected) == []
+
+
+def _run_one_finding(mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client, payload):
+    """Drives handler() over a single mapped finding with a canned model reply."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    finding = {**next(f for f in before["findings"]
+                      if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
+               "status": "mapped"}
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": [finding]},
+        {"Items": before["findings"]},
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {
+        "Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())
+    }
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response(payload)
+    mock_lambda_client.invoke.return_value = {
+        "Payload": SimpleNamespace(read=lambda: json.dumps(after).encode())
+    }
+
+    result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
+    return result, mock_table
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_declared_assumptions_force_human_review_despite_a_clean_rescan(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The port-80 class of failure: the scanner is satisfied, but the fix
+    rests on a claim about the wider system that nobody has checked."""
+    result, mock_table = _run_one_finding(
+        mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client,
+        {
+            "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+            "rationale": "Added a default SSE configuration.",
+            "assumptions": ["Assumes certificate issuance does not use ACME HTTP-01."],
+        },
+    )
+
+    assert result["fix_proposed_count"] == 0
+    assert result["needs_human_only_count"] == 1
+
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":status"] == "needs-human-only"
+    assert written[":pf"]["self_check_passed"] is False
+    assert written[":pf"]["assumptions"]
+    # The rescan still ran and its verdict is preserved for the reviewer.
+    assert written[":pf"]["cleared"] is True
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_no_assumptions_and_no_deletions_still_passes(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The gates must not swallow legitimately clean fixes."""
+    result, mock_table = _run_one_finding(
+        mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client,
+        {
+            "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+            "rationale": "Added a default SSE configuration.",
+            "assumptions": [],
+        },
+    )
+
+    assert result["fix_proposed_count"] == 1
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":status"] == "fix-proposed"
+    assert written[":pf"]["self_check_passed"] is True
+    assert written[":pf"]["dropped_resources"] == []
+    assert written[":pf"]["assumptions"] == []
+
+
 # ---------- _compute_diff ----------
 
 def test_compute_diff_matches_fixture_after_content():

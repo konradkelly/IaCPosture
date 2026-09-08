@@ -39,6 +39,13 @@ export interface ProposedFix {
    *  scanned: silencing a rule would pass the self-check by construction, so
    *  it can never be treated as a fix. */
   suppression_attempt?: string[]
+  /** Resources the fix deletes outright rather than tightening. Deleting
+   *  always satisfies the scanner, so these are held for review however clean
+   *  the rescan came back. */
+  dropped_resources?: string[]
+  /** Facts the fix depends on that the agent could not verify from the single
+   *  file it was shown. Non-empty forces human review. */
+  assumptions?: string[]
 }
 
 export interface Finding {

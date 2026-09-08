@@ -17,6 +17,7 @@ import difflib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import anthropic
@@ -46,10 +47,26 @@ REMEDIATION_OUTPUT_SCHEMA = {
     "properties": {
         "corrected_file_content": {"type": "string"},
         "rationale": {"type": "string"},
+        # Facts the fix depends on that couldn't be checked against the one
+        # file the agent was given, AND whose falsity would break something.
+        # Schema-required so the model has to answer rather than quietly fold
+        # a guess into fluent prose. A non-empty list forces human review --
+        # see _remediate_finding.
+        #
+        # The breakage test is doing real work in the prompt. Asking merely
+        # for "unverifiable facts" made every fix declare four of them,
+        # including provider-version notes and "SSE-S3 is transparent to
+        # clients", so nothing ever passed and the list became boilerplate to
+        # skim past -- which is how the one that matters gets missed.
+        "assumptions": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["corrected_file_content", "rationale"],
+    "required": ["corrected_file_content", "rationale", "assumptions"],
     "additionalProperties": False,
 }
+
+# `resource "<type>" "<name>" {` -- enough for counting blocks; this is a
+# guard, not an HCL parser.
+RESOURCE_BLOCK_RE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"\s*\{', re.MULTILINE)
 
 
 def handler(event, context):
@@ -92,6 +109,7 @@ def _remediate_finding(pr_id, finding):
     remediation = _call_remediation_agent(finding, original_content)
     corrected_content = remediation["corrected_file_content"]
     rationale = remediation["rationale"]
+    assumptions = remediation.get("assumptions") or []
 
     diff_text = _compute_diff(original_content, corrected_content, file_path)
 
@@ -118,8 +136,24 @@ def _remediate_finding(pr_id, finding):
         finding, rescan_findings, baseline_counts
     )
 
+    # A clean rescan proves the finding is gone. It says nothing about whether
+    # the infrastructure still works, and these two cases are exactly where
+    # that gap bites: a deleted resource always scans clean, and a fix resting
+    # on an unverifiable claim scans clean whether or not the claim is true.
+    # Both stay proposals a human has to weigh, so the verdict is overridden
+    # even when the scanner is satisfied. Scanned first regardless -- the
+    # rescan result is still worth showing the reviewer.
+    dropped_resources = _find_dropped_resources(original_content, corrected_content)
+    if dropped_resources or assumptions:
+        logger.info(
+            "finding %s held for human review (dropped=%s, assumptions=%s)",
+            finding_id, dropped_resources, assumptions,
+        )
+        self_check_passed = False
+
     _write_result(
-        finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared
+        finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
+        dropped_resources=dropped_resources, assumptions=assumptions,
     )
     return self_check_passed
 
@@ -207,7 +241,30 @@ def _call_remediation_agent(finding, original_content):
         "suppression comment. If you believe the flagged configuration is "
         "intentional and correct as written, say so in the rationale and "
         "return the file unchanged -- a human will decide. Suppressing a "
-        "finding is not a fix and will be rejected."
+        "finding is not a fix and will be rejected.\n\n"
+        "Prefer constraining a resource over removing it. Deleting a rule or "
+        "resource always satisfies the scanner, but may remove something the "
+        "running system depends on. Only delete when the resource is "
+        "genuinely unnecessary, and say so explicitly in the rationale.\n\n"
+        "You are shown ONE file. You cannot see the rest of the repository, "
+        "the running infrastructure, or how any of this is used. Never present "
+        "a guess about any of that as established fact in the rationale.\n\n"
+        "In `assumptions`, list ONLY claims that meet BOTH tests:\n"
+        "  (a) you could not verify it from the file above, AND\n"
+        "  (b) if it turned out to be false, applying this fix would break "
+        "the running system or leave the finding unfixed.\n"
+        "Examples that qualify: that a port being closed won't break "
+        "certificate issuance or health checks; that no other system depends "
+        "on a rule you narrowed; that traffic reaches the service by some "
+        "other path.\n"
+        "Do NOT list: provider or module version expectations, naming and "
+        "style choices, alternative approaches the reader might prefer, "
+        "generic best-practice caveats, or restatements of what the fix does. "
+        "Those belong in the rationale if they are worth saying at all.\n"
+        "An empty list is the correct and expected answer for a "
+        "self-contained fix. Every entry costs a human's attention, so a list "
+        "padded with things that cannot actually break anything is worse than "
+        "no list at all -- it buries the one that matters."
     )
 
     response = _get_anthropic_client().messages.create(
@@ -267,6 +324,40 @@ def _find_added_suppressions(diff_text):
         for line in added
         if any(marker in line.lower() for marker in SUPPRESSION_MARKERS)
     ]
+
+
+def _find_dropped_resources(original_content, corrected_content):
+    """Resources the fix deletes outright, rather than tightening in place.
+
+    Deleting a resource always satisfies the self-check -- the finding is gone
+    because the thing that raised it is gone -- so the scanner cannot tell
+    "narrowed the CIDR" from "removed the rule". Those are different risk
+    classes, and only one of them can take a service down.
+
+    Observed on real code: asked to fix an open port 80 ingress rule, the
+    agent deleted it and asserted that certificate issuance used DNS-01. The
+    repo's cert-manager ClusterIssuer uses HTTP-01, which needs port 80
+    reachable, so applying it would have broken TLS renewal ~60 days later.
+    The self-check passed it cleanly.
+
+    Compared per resource *type*, not per address, so renaming a resource
+    (a delete plus an add, as in a legitimate
+    nodeport_from_internet -> nodeport_from_admin rescope) isn't mistaken for
+    a deletion. Returns "<type>.<name>" for the addresses that vanished, so a
+    reviewer sees which ones, but only reports when the type's count actually
+    falls.
+    """
+    before = RESOURCE_BLOCK_RE.findall(original_content)
+    after = RESOURCE_BLOCK_RE.findall(corrected_content)
+
+    before_types = collections.Counter(t for t, _ in before)
+    after_types = collections.Counter(t for t, _ in after)
+    if not any(after_types[t] < n for t, n in before_types.items()):
+        return []
+
+    vanished = set(before) - set(after)
+    shrunk = {t for t, n in before_types.items() if after_types[t] < n}
+    return sorted(f"{t}.{n}" for t, n in vanished if t in shrunk)
 
 
 def _compute_diff(original_content, corrected_content, file_path):
@@ -347,7 +438,7 @@ def _evaluate_self_check(finding, rescan_findings, baseline_counts):
 
 def _write_result(
     finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
-    suppression_attempt=None,
+    suppression_attempt=None, dropped_resources=None, assumptions=None,
 ):
     table = dynamodb.Table(DYNAMODB_TABLE)
     table.update_item(
@@ -365,6 +456,11 @@ def _write_result(
                 # scanned, because it tried to silence the rule. Surfaced so a
                 # reviewer sees why rather than an unexplained failed check.
                 "suppression_attempt": suppression_attempt or [],
+                # Resources the fix deletes outright, and facts it depends on
+                # but couldn't verify. Either one forces human review no
+                # matter how clean the rescan came back.
+                "dropped_resources": dropped_resources or [],
+                "assumptions": assumptions or [],
             },
             ":status": "fix-proposed" if self_check_passed else "needs-human-only",
             ":now": datetime.now(timezone.utc).isoformat(),

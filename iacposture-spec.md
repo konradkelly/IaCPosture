@@ -215,6 +215,28 @@ Two consequences, both now implemented in `remediation-agent`:
 
 This also qualifies §8.1's admission rule. "The scanner's rule *is* the vulnerability" holds for what the rule *matches*, but every scanner ships an escape hatch that stops it matching without changing the infrastructure. Any scanner class admitted in future needs its suppression syntax added to `SUPPRESSION_MARKERS` before its fixes can be trusted.
 
+### 6.1 The self-check proves security posture, not functional correctness
+
+A clean rescan proves the finding is gone. It cannot prove the infrastructure still works, and nothing downstream should read it as though it does.
+
+The sharpest illustration, again from the first real-code run: asked to fix an open port 80 ingress rule, the agent deleted the rule and stated in its rationale that certificate issuance used DNS-01. PugetScope's cert-manager `ClusterIssuer` uses ACME **HTTP-01**, which requires inbound port 80. The fix would have broken TLS renewal roughly 60 days later — long after anyone would connect the outage to a security fix. It passed the self-check cleanly, because deleting the rule genuinely removes the finding.
+
+Two structural consequences, both enforced in `remediation-agent` rather than requested in the prompt:
+
+- **Deletions are held for review.** `_find_dropped_resources` compares resource-block counts per *type* between the original and corrected file. A net decrease forces `needs-human-only` however clean the rescan. Comparison is per type, not per address, so a rename (a delete plus an add — as in a legitimate `nodeport_from_internet` → `nodeport_from_admin` rescope) is not mistaken for a deletion.
+- **Unverifiable claims are declared, not buried.** `assumptions` is a required field on the agent's output schema, and a non-empty list forces `needs-human-only`. The agent sees exactly one file, so any claim about how the wider system behaves is a guess; the schema makes it a visible, checkable guess instead of confident prose.
+
+**Calibrating `assumptions` mattered as much as adding it.** Defined as "every fact you could not verify," even a self-contained fix (adding an SSE block to a bucket) declared four — provider versions, style preferences, *"SSE-S3 is transparent to clients"* — so nothing ever passed and `fix-proposed` became an empty category. A gate that catches everything discriminates nothing, and a reviewer trained to skim four bullets of boilerplate is a reviewer who will skim the one that matters. The definition is therefore **consequence-based**: an assumption qualifies only if it is unverifiable from the file *and* its falsity would break the running system or leave the finding unfixed. Measured either side of that change:
+
+| Case | "unverifiable" wording | consequence wording |
+|---|---|---|
+| S3 encryption (self-contained) | 4 assumptions, held | **0 assumptions, passes** |
+| Port 80 (depends on unseen ACME config) | 4 assumptions, held | **2 assumptions, held** — and both are real |
+
+The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now arrives with its own falsification test attached.
+
+**On division of labour between prompt and code.** The prompt is what changed the agent's *behaviour* — it stopped suppressing, and started constraining rather than deleting. The code gates are what make that behaviour non-optional. As of this writing neither the suppression nor the deletion gate has fired in production, because the prompt has so far prevented the behaviour they guard against; they are proven by unit tests against the real captured diffs. That is the intended arrangement, not a redundancy: a prompt is a request, and the project's premise is that the model's output is checked by code rather than trusted.
+
 ---
 
 ## 7. Eval Plan

@@ -160,8 +160,45 @@ export function FindingDetailPage() {
               </div>
             )}
 
+          {finding.proposed_fix.dropped_resources &&
+            finding.proposed_fix.dropped_resources.length > 0 && (
+              <div className="alert alert--warn">
+                <p>
+                  <strong>This fix deletes infrastructure rather than tightening it.</strong>{' '}
+                  Removing a resource always satisfies the scanner, because the thing that raised
+                  the finding is gone — but it may remove something the running system depends on.
+                  The scanner cannot tell the difference.
+                </p>
+                <ul>
+                  {finding.proposed_fix.dropped_resources.map((r) => (
+                    <li key={r}>
+                      <code>{r}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+          {finding.proposed_fix.assumptions &&
+            finding.proposed_fix.assumptions.length > 0 && (
+              <div className="alert alert--warn">
+                <p>
+                  <strong>This fix rests on facts the agent could not check.</strong> It saw only
+                  this one file — not the rest of the repository, nor the running system. Verify
+                  each of these before approving:
+                </p>
+                <ul>
+                  {finding.proposed_fix.assumptions.map((a) => (
+                    <li key={a}>{a}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
           {finding.proposed_fix.self_check_passed === false &&
-            !finding.proposed_fix.suppression_attempt?.length && (
+            !finding.proposed_fix.suppression_attempt?.length &&
+            !finding.proposed_fix.dropped_resources?.length &&
+            !finding.proposed_fix.assumptions?.length && (
             <div className="alert alert--warn">
               {/* cleared distinguishes two different failures: the fix missed
                   the original finding, or it cleared the original but
