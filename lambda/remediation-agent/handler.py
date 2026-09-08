@@ -12,6 +12,7 @@ Event shape:
 { "pr_id": "manual-test-1" }
 """
 
+import collections
 import difflib
 import json
 import logging
@@ -94,12 +95,27 @@ def _remediate_finding(pr_id, finding):
 
     diff_text = _compute_diff(original_content, corrected_content, file_path)
 
+    # Gate before the self-check, not after: a suppression would *pass* the
+    # self-check by construction, so there is no point scanning it.
+    suppressions = _find_added_suppressions(diff_text)
+    if suppressions:
+        logger.warning(
+            "remediation for finding %s tried to suppress the scanner rather than fix it: %s",
+            finding_id, suppressions,
+        )
+        _write_result(
+            finding, diff_text, rationale,
+            self_check_passed=False, self_check_new_findings=[], cleared=False,
+            suppression_attempt=suppressions,
+        )
+        return False
+
     _upload_scratch_file(pr_id, finding_id, file_path, corrected_content)
     rescan_findings = _invoke_self_check(pr_id, finding_id)
 
-    baseline_pairs = _query_baseline_pairs(pr_id, file_path)
+    baseline_counts = _query_baseline_counts(pr_id, file_path)
     self_check_passed, self_check_new_findings, cleared = _evaluate_self_check(
-        finding, rescan_findings, baseline_pairs
+        finding, rescan_findings, baseline_counts
     )
 
     _write_result(
@@ -138,10 +154,13 @@ def _query_mapped_findings(pr_id):
     )
 
 
-def _query_baseline_pairs(pr_id, file_path):
-    """(source, rule_id) pairs from every finding this PR has on file_path,
-    regardless of status -- the "no new findings" check in step 7 needs the
-    baseline scan's full finding set for the file, not just zero."""
+def _query_baseline_counts(pr_id, file_path):
+    """How many times each (source, rule_id) fires on file_path in the baseline
+    scan, across every status.
+
+    Counts rather than a set: one file often carries several instances of the
+    same rule (three open-ingress rules in one security group, say), and the
+    self-check has to distinguish "one of them was fixed" from "none were"."""
     table = dynamodb.Table(DYNAMODB_TABLE)
     items = _query_all(
         table,
@@ -154,7 +173,7 @@ def _query_baseline_pairs(pr_id, file_path):
             ":file": file_path,
         },
     )
-    return {(item["source"], item["rule_id"]) for item in items}
+    return collections.Counter((item["source"], item["rule_id"]) for item in items)
 
 
 def _fetch_original_content(pr_id, file_path):
@@ -182,7 +201,13 @@ def _call_remediation_agent(finding, original_content):
         "Return the complete corrected file content with a minimal fix for "
         "this specific finding only -- do not restructure unrelated code or "
         "address other findings in the file. Return the full file, not a "
-        "diff or a snippet. Also return a short rationale for the fix."
+        "diff or a snippet. Also return a short rationale for the fix.\n\n"
+        "Fix the underlying configuration. Never silence the scanner: do not "
+        "add tfsec:ignore, trivy:ignore, checkov:skip, nosec, or any other "
+        "suppression comment. If you believe the flagged configuration is "
+        "intentional and correct as written, say so in the rationale and "
+        "return the file unchanged -- a human will decide. Suppressing a "
+        "finding is not a fix and will be rejected."
     )
 
     response = _get_anthropic_client().messages.create(
@@ -202,6 +227,46 @@ def _call_remediation_agent(finding, original_content):
         raise RuntimeError(f"remediation-agent got no text block for finding {finding['finding_id']}")
 
     return json.loads(text)
+
+
+# Directives that make a scanner stop reporting a finding without changing
+# any infrastructure. tfsec and checkov are what this project runs; trivy is
+# tfsec's successor and accepts the same comment under its own name.
+SUPPRESSION_MARKERS = ("tfsec:ignore", "trivy:ignore", "checkov:skip", "nosec")
+
+
+def _find_added_suppressions(diff_text):
+    """Suppression directives the fix would ADD, if any.
+
+    This is the one edit that defeats the integrity guarantee outright. The
+    self-check asks "does the scanner still report this finding" -- so a diff
+    that merely silences the rule clears the finding, introduces no new ones,
+    and comes back self_check_passed=true. The agent would earn a
+    scanner-verified badge for changing nothing.
+
+    Observed on real code: asked to fix a CRITICAL 0.0.0.0/0 ingress rule, the
+    agent left the CIDR untouched and added `#tfsec:ignore:` plus a confident
+    justification. It was caught only because that file happened to hold three
+    instances of the rule, so the rescan still reported it -- an accident, not
+    a defence, and one that _evaluate_self_check's occurrence counting now
+    (correctly) removes.
+
+    Enforced here rather than only forbidden in the prompt: the whole premise
+    of the project is that the model's output is checked by code, not trusted.
+
+    Only added lines are examined -- a suppression already in the file is the
+    author's decision and none of this function's business.
+    """
+    added = [
+        line[1:]
+        for line in diff_text.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    return [
+        line.strip()
+        for line in added
+        if any(marker in line.lower() for marker in SUPPRESSION_MARKERS)
+    ]
 
 
 def _compute_diff(original_content, corrected_content, file_path):
@@ -250,12 +315,22 @@ def _invoke_self_check(pr_id, finding_id):
     return result["findings"]
 
 
-def _evaluate_self_check(finding, rescan_findings, baseline_pairs):
+def _evaluate_self_check(finding, rescan_findings, baseline_counts):
     target_pair = (finding["source"], finding["rule_id"])
-    rescan_pairs = {(f["source"], f["rule_id"]) for f in rescan_findings}
+    rescan_counts = collections.Counter((f["source"], f["rule_id"]) for f in rescan_findings)
 
-    cleared = target_pair not in rescan_pairs
-    new_pairs = rescan_pairs - baseline_pairs
+    # Occurrence counts, not mere presence. A file can hold several instances
+    # of one rule, and fixing the flagged instance leaves the others firing --
+    # presence alone would report a real fix as uncleared. The inverse matters
+    # more: a rule appearing fewer times than before means an instance
+    # genuinely went away, which presence can't see at all.
+    cleared = rescan_counts[target_pair] < baseline_counts[target_pair]
+
+    # "New" covers a rule absent from the baseline *and* extra instances of one
+    # already there -- a fix that doubles an existing problem isn't clean.
+    new_pairs = {
+        pair for pair, n in rescan_counts.items() if n > baseline_counts.get(pair, 0)
+    }
     no_new_findings = not new_pairs
 
     self_check_passed = cleared and no_new_findings
@@ -271,7 +346,8 @@ def _evaluate_self_check(finding, rescan_findings, baseline_pairs):
 
 
 def _write_result(
-    finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared
+    finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
+    suppression_attempt=None,
 ):
     table = dynamodb.Table(DYNAMODB_TABLE)
     table.update_item(
@@ -285,6 +361,10 @@ def _write_result(
                 "self_check_passed": self_check_passed,
                 "self_check_new_findings": self_check_new_findings,
                 "cleared": cleared,
+                # Non-empty means the fix was refused before it was ever
+                # scanned, because it tried to silence the rule. Surfaced so a
+                # reviewer sees why rather than an unexplained failed check.
+                "suppression_attempt": suppression_attempt or [],
             },
             ":status": "fix-proposed" if self_check_passed else "needs-human-only",
             ":now": datetime.now(timezone.utc).isoformat(),

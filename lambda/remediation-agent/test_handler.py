@@ -7,6 +7,7 @@ fixtures/ (see fixtures/README.md) rather than hand-written scan responses,
 per that README's guidance to keep ground truth accurate.
 """
 
+import collections
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +30,10 @@ def _read_fixture_tf(name, side):
 
 
 def _pairs(scan_response):
-    return {(f["source"], f["rule_id"]) for f in scan_response["findings"]}
+    """Baseline occurrence counts, matching _query_baseline_counts."""
+    return collections.Counter(
+        (f["source"], f["rule_id"]) for f in scan_response["findings"]
+    )
 
 
 # ---------- _evaluate_self_check ----------
@@ -93,6 +97,155 @@ def test_self_check_fails_when_fix_introduces_a_new_finding():
     # findings with it. Collapsing this into "self-check failed" like cleared
     # is False would misreport a fix that's most of the way there.
     assert cleared is True
+
+
+def test_self_check_clears_when_one_of_several_instances_is_fixed():
+    """A file can hold the same rule several times. Fixing the flagged one
+    leaves the others firing, and presence-based comparison would call that
+    an uncleared finding."""
+    before = _load_fixture("open-ssh-ingress", "before")
+    finding = next(f for f in before["findings"] if f["rule_id"] == "aws-ec2-no-public-ingress-sgr")
+    target = (finding["source"], finding["rule_id"])
+
+    baseline = collections.Counter({target: 3})
+    rescan = [{"source": target[0], "rule_id": target[1]}] * 2  # one instance gone
+
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, rescan, baseline)
+
+    assert cleared is True
+    assert new_findings == []
+    assert passed is True
+
+
+def test_self_check_does_not_clear_when_instance_count_is_unchanged():
+    before = _load_fixture("open-ssh-ingress", "before")
+    finding = next(f for f in before["findings"] if f["rule_id"] == "aws-ec2-no-public-ingress-sgr")
+    target = (finding["source"], finding["rule_id"])
+
+    baseline = collections.Counter({target: 3})
+    rescan = [{"source": target[0], "rule_id": target[1]}] * 3  # nothing changed
+
+    passed, _, cleared = handler._evaluate_self_check(finding, rescan, baseline)
+
+    assert cleared is False
+    assert passed is False
+
+
+def test_extra_instance_of_an_existing_rule_counts_as_a_new_finding():
+    """A fix that doubles a problem already present isn't clean, even though
+    the rule was in the baseline."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    finding = next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption")
+    target = (finding["source"], finding["rule_id"])
+    other = ("tfsec", "aws-s3-enable-bucket-logging")
+
+    baseline = collections.Counter({target: 1, other: 1})
+    rescan = [{"source": other[0], "rule_id": other[1]}] * 2  # target gone, other doubled
+
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, rescan, baseline)
+
+    assert cleared is True
+    assert new_findings == ["tfsec:aws-s3-enable-bucket-logging"]
+    assert passed is False
+
+
+# ---------- suppression rejection ----------
+
+# The literal diff the agent produced against PugetScope's security groups: it
+# left cidr_blocks = ["0.0.0.0/0"] untouched and silenced the rule instead.
+PUGETSCOPE_SUPPRESSION_DIFF = '''--- a/modules/security_groups/main.tf
++++ b/modules/security_groups/main.tf
+@@ -50,12 +50,16 @@
+   description       = "HTTP for the public app via ingress"
+ }
+
++# The application is intentionally served to the public internet over TLS on
++# 443 via the nginx ingress controller running on these nodes, so open HTTPS
++# ingress is required by design and is reviewed/accepted here.
++#tfsec:ignore:aws-ec2-no-public-ingress-sgr
+ resource "aws_security_group_rule" "https_from_internet" {
+   type              = "ingress"
+-  cidr_blocks       = ["0.0.0.0/0"]
++  cidr_blocks       = ["0.0.0.0/0"] #tfsec:ignore:aws-ec2-no-public-ingress-sgr
+   security_group_id = aws_security_group.k8s_nodes.id
+ }
+'''
+
+
+def test_detects_the_real_suppression_diff_from_pugetscope():
+    found = handler._find_added_suppressions(PUGETSCOPE_SUPPRESSION_DIFF)
+
+    assert len(found) == 2
+    assert all("tfsec:ignore" in line for line in found)
+
+
+@pytest.mark.parametrize("marker", [
+    "#tfsec:ignore:aws-ec2-no-public-ingress-sgr",
+    "# trivy:ignore:AVD-AWS-0107",
+    "#checkov:skip=CKV_AWS_18:reviewed",
+    "# nosec",
+])
+def test_every_suppression_dialect_is_caught(marker):
+    diff = f"--- a/main.tf\n+++ b/main.tf\n@@ -1 +1,2 @@\n {marker.upper()}\n+  {marker}\n"
+
+    assert handler._find_added_suppressions(diff)
+
+
+def test_preexisting_suppressions_are_not_the_agents_doing():
+    """A suppression already in the file is the author's call. Only lines the
+    fix adds are the agent's responsibility."""
+    diff = (
+        "--- a/main.tf\n+++ b/main.tf\n@@ -1,3 +1,3 @@\n"
+        " #tfsec:ignore:aws-ec2-no-public-ingress-sgr\n"
+        '-  cidr_blocks = ["0.0.0.0/0"]\n'
+        '+  cidr_blocks = ["10.0.0.0/8"]\n'
+    )
+
+    assert handler._find_added_suppressions(diff) == []
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_suppressing_fix_is_rejected_before_it_is_ever_scanned(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The critical path. A suppression would pass the self-check by
+    construction -- the rule stops firing and nothing new appears -- so it has
+    to be refused before the scanner ever runs on it."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    finding = {**next(f for f in before["findings"]
+                      if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
+               "status": "mapped"}
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": [finding]}]
+    mock_dynamodb.Table.return_value = mock_table
+
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+
+    # The model "fixes" it by appending a suppression instead of encrypting.
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
+        "corrected_file_content": original + "\n#tfsec:ignore:aws-s3-enable-bucket-encryption\n",
+        "rationale": "Bucket holds only public assets, so encryption is unnecessary.",
+    })
+
+    result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
+
+    assert result["fix_proposed_count"] == 0
+    assert result["needs_human_only_count"] == 1
+
+    # Never scanned, never uploaded for scanning.
+    mock_lambda_client.invoke.assert_not_called()
+    mock_s3.put_object.assert_not_called()
+
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":status"] == "needs-human-only"
+    assert written[":pf"]["self_check_passed"] is False
+    assert written[":pf"]["cleared"] is False
+    assert written[":pf"]["suppression_attempt"]
 
 
 # ---------- _compute_diff ----------

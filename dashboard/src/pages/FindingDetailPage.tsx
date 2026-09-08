@@ -138,7 +138,30 @@ export function FindingDetailPage() {
           <h2>Remediation rationale</h2>
           <p>{finding.proposed_fix.rationale}</p>
 
-          {finding.proposed_fix.self_check_passed === false && (
+          {finding.proposed_fix.suppression_attempt &&
+            finding.proposed_fix.suppression_attempt.length > 0 && (
+              <div className="alert alert--error">
+                <p>
+                  <strong>This fix tried to silence the scanner, not fix the finding.</strong> It
+                  was rejected before being scanned — a suppression comment would clear the rule
+                  without changing anything, and would otherwise have passed the self-check.
+                </p>
+                <ul>
+                  {finding.proposed_fix.suppression_attempt.map((line) => (
+                    <li key={line}>
+                      <code>{line}</code>
+                    </li>
+                  ))}
+                </ul>
+                <p>
+                  If the flagged configuration really is intentional, that's a human decision to
+                  record here — not something the agent may assert for you.
+                </p>
+              </div>
+            )}
+
+          {finding.proposed_fix.self_check_passed === false &&
+            !finding.proposed_fix.suppression_attempt?.length && (
             <div className="alert alert--warn">
               {/* cleared distinguishes two different failures: the fix missed
                   the original finding, or it cleared the original but

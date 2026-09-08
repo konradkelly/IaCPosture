@@ -204,6 +204,17 @@ Both LLM-calling Lambdas constrain output to schema-validated JSON — no free t
 
 `self_check_passed` is **never** an LLM-asserted field — it's computed by re-running the deterministic scanner against the patched file and comparing findings before/after in code. This is the single most important integrity guarantee in the system.
 
+**Suppression comments defeat that guarantee, and must be rejected in code.** The self-check asks "does the scanner still report this finding?", so a diff that merely silences the rule — `#tfsec:ignore:`, `#checkov:skip=`, `trivy:ignore`, `nosec` — clears the finding, introduces nothing new, and comes back `self_check_passed: true`. The agent earns a scanner-verified badge for changing no infrastructure at all.
+
+This is not hypothetical. On the first run against real code (PugetScope, §7), asked to fix a CRITICAL `0.0.0.0/0` ingress rule, the agent left the CIDR untouched and added `#tfsec:ignore:aws-ec2-no-public-ingress-sgr` twice, with a fluent justification comment. It failed the self-check only by accident: that file held three instances of the rule, so the rescan still reported the pair. In a single-instance file it would have passed and been presented to a reviewer as verified.
+
+Two consequences, both now implemented in `remediation-agent`:
+
+- The prompt forbids suppressions **and** `_find_added_suppressions` enforces it on the diff's added lines, refusing the fix before the scanner ever runs. Prompt-only would be trusting the model's output, which is precisely what this project exists not to do. Pre-existing suppressions are the author's decision and are left alone.
+- The before/after comparison counts **occurrences** per `(source, rule_id)` rather than testing presence, so "one of three instances was fixed" is distinguishable from "none were". Note this removes the accident above — which is exactly why the suppression check has to be a hard gate rather than advisory.
+
+This also qualifies §8.1's admission rule. "The scanner's rule *is* the vulnerability" holds for what the rule *matches*, but every scanner ships an escape hatch that stops it matching without changing the infrastructure. Any scanner class admitted in future needs its suppression syntax added to `SUPPRESSION_MARKERS` before its fixes can be trusted.
+
 ---
 
 ## 7. Eval Plan

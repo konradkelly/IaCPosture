@@ -34,6 +34,11 @@ export interface ProposedFix {
    *  missed the original entirely. Absent on records written before this
    *  field existed. */
   cleared?: boolean
+  /** Suppression directives the agent tried to add (tfsec:ignore, checkov:skip
+   *  and friends). Non-empty means the fix was refused before it was ever
+   *  scanned: silencing a rule would pass the self-check by construction, so
+   *  it can never be treated as a fix. */
+  suppression_attempt?: string[]
 }
 
 export interface Finding {
