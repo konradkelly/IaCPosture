@@ -4,13 +4,21 @@ import type { ReviewAction } from '../types/finding'
 
 interface ReviewActionsProps {
   disabled?: boolean
+  /** Why the actions are disabled, shown above the buttons. Without this a
+   *  reviewer just sees dead controls and reasonably reads it as a bug. */
+  disabledReason?: string
   /** The proposed diff to prefill the edit textarea with. Approve-with-edits
    *  is hidden entirely when this is absent -- there's nothing to edit. */
   currentDiff?: string
   onSubmit: (payload: { action: ReviewAction; notes: string; edited_diff?: string }) => Promise<void>
 }
 
-export function ReviewActions({ disabled, currentDiff, onSubmit }: ReviewActionsProps) {
+export function ReviewActions({
+  disabled,
+  disabledReason,
+  currentDiff,
+  onSubmit,
+}: ReviewActionsProps) {
   const { actor } = useAuth()
   const [notes, setNotes] = useState('')
   const [editing, setEditing] = useState(false)
@@ -52,6 +60,10 @@ export function ReviewActions({ disabled, currentDiff, onSubmit }: ReviewActions
         The agent proposes; you dispose. Every decision is logged as an immutable audit event,
         attributed to <strong>{actor ?? 'you'}</strong>.
       </p>
+
+      {disabled && disabledReason && (
+        <p className="alert alert--info">{disabledReason}</p>
+      )}
 
       <div className="form-field">
         <label htmlFor="reviewer-notes">Notes (optional)</label>

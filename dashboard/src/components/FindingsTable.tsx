@@ -1,7 +1,23 @@
 import { Link } from 'react-router-dom'
 import type { Finding, FindingStatus } from '../types/finding'
 import { SelfCheckBadge } from './SelfCheckBadge'
+import { SeverityBadge } from './SeverityBadge'
 import { StatusBadge } from './StatusBadge'
+
+// Worst first: a scan can return dozens of findings, and the CRITICAL one is
+// the whole point of looking. Unrecognised or absent severities sort last
+// rather than being dropped.
+const SEVERITY_RANK: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  unknown: 4,
+}
+
+function severityRank(finding: Finding): number {
+  return SEVERITY_RANK[finding.severity?.toLowerCase() ?? ''] ?? 5
+}
 
 const ALL_STATUSES: FindingStatus[] = [
   'raw',
@@ -35,10 +51,11 @@ export function FindingsTable({
   statusFilter,
   onStatusFilterChange,
 }: FindingsTableProps) {
-  const filtered =
-    statusFilter === 'all'
-      ? findings
-      : findings.filter((f) => f.status === statusFilter)
+  const filtered = (
+    statusFilter === 'all' ? findings : findings.filter((f) => f.status === statusFilter)
+  )
+    .slice()
+    .sort((a, b) => severityRank(a) - severityRank(b) || a.rule_id.localeCompare(b.rule_id))
 
   return (
     <div className="findings-table-wrap">
@@ -92,7 +109,9 @@ export function FindingsTable({
                 <td>
                   <code>{formatLocation(finding)}</code>
                 </td>
-                <td>{finding.severity ?? '—'}</td>
+                <td>
+                  <SeverityBadge severity={finding.severity} />
+                </td>
                 <td>
                   <SelfCheckBadge proposedFix={finding.proposed_fix} />
                 </td>

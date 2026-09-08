@@ -11,6 +11,7 @@ import { ControlMapping } from '../components/ControlMapping'
 import { DiffViewer } from '../components/DiffViewer'
 import { ReviewActions } from '../components/ReviewActions'
 import { SelfCheckBadge } from '../components/SelfCheckBadge'
+import { SeverityBadge } from '../components/SeverityBadge'
 import { StatusBadge } from '../components/StatusBadge'
 import type { Finding, ReviewEvent } from '../types/finding'
 
@@ -83,6 +84,7 @@ export function FindingDetailPage() {
   }
 
   const canReview = finding.status !== 'resolved'
+  const awaitingRemediation = finding.status === 'raw' || finding.status === 'mapped'
   const showDiff =
     finding.proposed_fix?.diff &&
     (finding.status === 'fix-proposed' || finding.status === 'resolved')
@@ -117,15 +119,10 @@ export function FindingDetailPage() {
                 </span>
               </>
             )}
-            {finding.severity && (
-              <>
-                <span>·</span>
-                <span>{finding.severity}</span>
-              </>
-            )}
           </p>
         </div>
         <div className="finding-header__badges">
+          <SeverityBadge severity={finding.severity} />
           <StatusBadge status={finding.status} />
           <SelfCheckBadge proposedFix={finding.proposed_fix} />
         </div>
@@ -216,18 +213,16 @@ export function FindingDetailPage() {
 
       {canReview && (
         <ReviewActions
-          disabled={finding.status === 'raw' || finding.status === 'mapped'}
+          disabled={awaitingRemediation}
+          disabledReason={
+            awaitingRemediation
+              ? 'Remediation has not run for this finding yet, so there is no proposed fix to accept or refuse. Review unlocks at status fix-proposed or needs-human-only.'
+              : undefined
+          }
           currentDiff={finding.proposed_fix?.diff}
           onSubmit={handleReview}
         />
       )}
-
-      {finding.status === 'raw' || finding.status === 'mapped' ? (
-        <p className="muted review-hint">
-          Review actions unlock once remediation completes (status <code>fix-proposed</code> or{' '}
-          <code>needs-human-only</code>).
-        </p>
-      ) : null}
 
       {finding.status === 'resolved' && (
         <p className="alert alert--success">This finding has been resolved.</p>

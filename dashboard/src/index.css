@@ -299,6 +299,22 @@ textarea {
   color: var(--danger);
 }
 
+/* Matches .panel so the review section doesn't read as floating loose
+   content between the panelled sections above and below it. */
+.review-actions {
+  display: block;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.review-actions h2 {
+  margin-bottom: 0.75rem;
+}
+
 .review-actions__buttons {
   display: flex;
   flex-wrap: wrap;
@@ -331,6 +347,14 @@ textarea {
   background: var(--success-dim);
   border-color: var(--success);
   color: #86efac;
+}
+
+/* Neutral, for explaining state rather than reporting a problem -- a finding
+   still waiting on remediation isn't an error or a warning. */
+.alert--info {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--text-muted);
 }
 
 /* Badges */
@@ -395,6 +419,39 @@ textarea {
   color: var(--text-muted);
 }
 
+/* Severity. Critical is filled rather than tinted so it separates from high
+   at a glance -- the two are adjacent in hue but very different in urgency. */
+
+.badge--sev-critical {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.badge--sev-high {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.badge--sev-medium {
+  background: var(--warn-dim);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.badge--sev-low {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge--sev-unknown {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
 /* Summary cards */
 
 .summary-cards {
@@ -409,7 +466,7 @@ textarea {
   flex-direction: column;
   align-items: center;
   min-width: 5.5rem;
-  padding: 0.6rem 1rem;
+  padding: 0.8rem 1.25rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-panel);
@@ -438,11 +495,14 @@ textarea {
 
 /* Findings table */
 
+/* Sits inside .findings-table-wrap's border, so it needs its own inset --
+   without it the label butts straight against the container edge. Matches the
+   table's first-column padding so the two line up. */
 .filter-bar {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  padding: 0.9rem 1.25rem;
   font-size: 0.85rem;
 }
 
@@ -461,9 +521,21 @@ textarea {
 
 .findings-table th,
 .findings-table td {
-  padding: 0.65rem 0.85rem;
+  padding: 0.8rem 1rem;
   text-align: left;
   border-bottom: 1px solid var(--border);
+}
+
+/* Edge columns get extra inset so badges and links don't crowd the
+   container's rounded border. */
+.findings-table th:first-child,
+.findings-table td:first-child {
+  padding-left: 1.25rem;
+}
+
+.findings-table th:last-child,
+.findings-table td:last-child {
+  padding-right: 1.25rem;
 }
 
 .findings-table th {
@@ -560,11 +632,6 @@ textarea {
   margin-bottom: 0;
 }
 
-.review-hint {
-  font-size: 0.85rem;
-  margin-top: -0.5rem;
-  margin-bottom: 1rem;
-}
 
 /* Control mapping */
 
