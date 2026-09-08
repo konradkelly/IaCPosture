@@ -95,7 +95,7 @@ The system is built as a serverless pipeline so it doubles as hands-on practice 
 | **CloudWatch (Logs, Metrics, Alarms)** | Structured logs per Lambda, custom metric for findings-per-scan and fix-acceptance-rate, alarm on scan failures | Troubleshooting and Monitoring |
 | **X-Ray** | Trace a webhook event end-to-end through the SQS → Lambda chain — useful for debugging latency in the self-check loop | Troubleshooting and Monitoring |
 | **CloudFront + S3 (static hosting)** | Hosts the review dashboard (React + Vite + TypeScript) | Deployment |
-| **Cognito** *(optional, v1.1)* | Auth for the dashboard if this ever needs to be multi-tenant / used by someone other than you | Security |
+| **Cognito** | Auth for the review dashboard and its API. Pulled forward from the original v1.1 plan (see §8): the API exposes real vulnerability findings and a route that resolves them, and an unauthenticated write endpoint plus a self-asserted audit-trail actor were both live problems the moment the dashboard went internet-facing, not multi-tenant-only ones. | Security |
 
 ### 4.2 Data store decision
 
@@ -200,11 +200,10 @@ Both LLM-calling Lambdas constrain output to schema-validated JSON — no free t
 
 | Phase | Scope |
 |---|---|
-| **v1 — Terraform only, read-only scan + suggest** | `terraform-scanner` + Layers 2-3 running on manual trigger (CLI or simple upload), findings + proposed diffs shown in dashboard, no GitHub write-back. Fastest path to a complete, demoable project — proves the whole pipeline (scan → map → remediate → self-check → review) on one IaC type before adding scope. |
+| **v1 — Terraform only, read-only scan + suggest** | `terraform-scanner` + Layers 2-3 running on manual trigger (CLI or simple upload), findings + proposed diffs shown in dashboard, no GitHub write-back. Fastest path to a complete, demoable project — proves the whole pipeline (scan → map → remediate → self-check → review) on one IaC type before adding scope. Dashboard and review API ship behind Cognito from the start (see below) rather than as a later add-on. |
 | **v2 — Add Kubernetes/Helm scanning** | `k8s-scanner` Lambda added alongside `terraform-scanner`, same shared Checkov layer, `webhook-receiver`/`mapping-agent`/`remediation-agent`/dashboard unchanged (see §4.4). CIS Kubernetes Benchmark + OWASP Cloud-Native guidance added to the control corpus. |
 | **v3 — CI integration** | GitHub App/webhook, PR-triggered scans, diff suggestions posted as PR comments |
 | **v4 — Write-back on approval** | Approved fixes committed to PR branch automatically |
-| **v1.1 (parallel, optional)** | Cognito auth if opening the dashboard beyond yourself |
 
 **Recommended sequencing given your Feb–June 2027 timeline:** ship v1 first as a complete, demoable artifact — Terraform-only already exercises every DVA-C02-relevant AWS resource in §4.1 except `k8s-scanner` itself. Add v2 (K8s/Helm) once v1's eval numbers (§7) are solid, then invest in v3's GitHub App plumbing last, since it's the most infra-heavy phase for the least new agent-architecture learning.
 

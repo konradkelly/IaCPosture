@@ -14,10 +14,23 @@ export function SelfCheckBadge({ proposedFix }: SelfCheckBadgeProps) {
   }
 
   const newCount = proposedFix.self_check_new_findings?.length ?? 0
-  const detail =
-    newCount > 0
-      ? `${newCount} new finding${newCount === 1 ? '' : 's'} introduced`
-      : 'Original issue not cleared'
+  const reasons: string[] = []
+
+  // cleared distinguishes the two ways a self-check fails -- a fix that
+  // missed the original finding entirely, versus one that cleared it but
+  // introduced new findings along the way. A record can be both at once, and
+  // guessing from newCount alone (the pre-`cleared` heuristic) silently drops
+  // the "original not cleared" half whenever new findings are also present.
+  // proposedFix.cleared is undefined on records written before this field
+  // existed, in which case that heuristic is the best available fallback.
+  if (proposedFix.cleared === false || (proposedFix.cleared === undefined && newCount === 0)) {
+    reasons.push('original issue not cleared')
+  }
+  if (newCount > 0) {
+    reasons.push(`${newCount} new finding${newCount === 1 ? '' : 's'} introduced`)
+  }
+
+  const detail = reasons.length > 0 ? reasons.join('; ') : 'Original issue not cleared'
 
   return (
     <span className="badge badge--fail" title={detail}>

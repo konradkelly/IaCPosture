@@ -99,6 +99,10 @@ p {
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
   padding: 0.75rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
 .header__brand {
@@ -106,6 +110,12 @@ p {
   align-items: baseline;
   gap: 0.75rem;
   text-decoration: none;
+}
+
+.header__account {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .header__brand:hover {
@@ -264,6 +274,11 @@ textarea {
 
 .btn--secondary {
   background: transparent;
+}
+
+.btn--small {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
 }
 
 .btn--approve {
@@ -534,6 +549,17 @@ textarea {
   margin-bottom: 0.75rem;
 }
 
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.panel__header h2 {
+  margin-bottom: 0;
+}
+
 .review-hint {
   font-size: 0.85rem;
   margin-top: -0.5rem;
@@ -590,6 +616,18 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+}
+
+.review-actions__diff-editor {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  background: #0a0c10;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  resize: vertical;
 }
 
 .diff-viewer__file {

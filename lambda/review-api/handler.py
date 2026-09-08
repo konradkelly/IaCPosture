@@ -9,7 +9,9 @@ proposes, a person disposes. Every decision writes an immutable ReviewEvent
 (spec §5) alongside the status change, so nothing is silently decided.
 
 Wired to an API Gateway HTTP API (payload format 2.0), one Lambda handling
-every route via `routeKey` dispatch.
+every route via `routeKey` dispatch. Every route sits behind a Cognito JWT
+authorizer, so by the time this code runs the caller has a verified identity --
+which is where a review's `actor` comes from. See _actor_from_claims.
 """
 
 import decimal
@@ -62,13 +64,36 @@ def handler(event, context):
             return _ok(_list_events(params["finding_id"]))
 
         if route_key == "POST /prs/{pr_id}/findings/{finding_id}/review":
-            return _post_review(params["pr_id"], params["finding_id"], event.get("body"))
+            return _post_review(
+                params["pr_id"], params["finding_id"], event.get("body"), event
+            )
 
         return _error(404, f"unknown route {route_key!r}")
     except Exception:
         # Never leak internals to an HTTP client; CloudWatch has the detail.
         logger.exception("review-api failed handling %s", route_key)
         return _error(500, "internal error")
+
+
+def _actor_from_claims(event):
+    """The caller's identity, taken from the JWT the authorizer verified.
+
+    API Gateway will not invoke this function unless the token's signature,
+    issuer, audience and expiry all check out, so these claims are trustworthy
+    in a way a request body never is. Preferring email over sub keeps the audit
+    trail readable; sub is the fallback because email is only guaranteed when
+    the pool is configured to require it.
+
+    Returns None if the claims are missing entirely, which should mean the
+    authorizer was removed from the route -- treated as an auth failure rather
+    than quietly attributing the decision to nobody.
+    """
+    claims = (
+        (event.get("requestContext") or {}).get("authorizer") or {}
+    ).get("jwt", {}).get("claims") or {}
+
+    actor = claims.get("email") or claims.get("cognito:username") or claims.get("sub")
+    return actor or None
 
 
 # ---------- routes ----------
@@ -101,7 +126,14 @@ def _list_events(finding_id):
     return {"finding_id": finding_id, "count": len(items), "events": items}
 
 
-def _post_review(pr_id, finding_id, raw_body):
+def _post_review(pr_id, finding_id, raw_body, event):
+    # Identity first: nothing about this request is worth parsing if we can't
+    # say who made it.
+    actor = _actor_from_claims(event)
+    if actor is None:
+        logger.error("review POST reached the handler with no verified JWT claims")
+        return _error(401, "unauthenticated")
+
     try:
         body = json.loads(raw_body or "{}")
     except json.JSONDecodeError:
@@ -111,17 +143,31 @@ def _post_review(pr_id, finding_id, raw_body):
     if action not in VALID_ACTIONS:
         return _error(400, f"action must be one of {sorted(VALID_ACTIONS)}")
 
-    actor = body.get("actor")
-    if not actor:
-        return _error(400, "actor is required")
+    # An "actor" in the body is ignored rather than honoured: it used to be the
+    # source of truth, and silently preferring it again would let a caller sign
+    # someone else's name to a decision.
 
-    # Don't write an audit event pointing at a finding that doesn't exist.
-    if _get_finding(pr_id, finding_id) is None:
+    edited_diff = body.get("edited_diff")
+    if action == "edited" and not edited_diff:
+        return _error(400, "edited_diff is required when action is 'edited'")
+    if action != "edited" and edited_diff is not None:
+        return _error(400, "edited_diff is only valid when action is 'edited'")
+
+    finding = _get_finding(pr_id, finding_id)
+    if finding is None:
         return _error(404, "finding not found")
+
+    proposed_fix = finding.get("proposed_fix")
+    if action in RESOLVING_ACTIONS and proposed_fix is None:
+        return _error(409, "finding has no proposed fix to act on")
 
     now = datetime.now(timezone.utc).isoformat()
     table = dynamodb.Table(DYNAMODB_TABLE)
 
+    # Event written before the finding is mutated: a failure partway through
+    # then leaves a recoverable trace (an attempted decision with no state
+    # change) rather than the reverse -- a state change nobody logged, which
+    # is the failure mode spec §1 forbids.
     table.put_item(Item={
         "pk": f"FINDING#{finding_id}",
         "sk": f"EVENT#{now}",
@@ -130,17 +176,43 @@ def _post_review(pr_id, finding_id, raw_body):
         "actor": actor,
         "action": action,
         "notes": body.get("notes", ""),
+        "edited_diff": edited_diff,
         "created_at": now,
     })
 
     status = None
     if action in RESOLVING_ACTIONS:
         status = "resolved"
+        update_expression = "SET #status = :status, updated_at = :now"
+        values = {":status": status, ":now": now}
+
+        if action == "edited":
+            update_expression += ", proposed_fix = :pf"
+            values[":pf"] = {
+                **proposed_fix,
+                "diff": edited_diff,
+                # Preserved on the first edit only, never overwritten again --
+                # it's the only record of what the agent actually proposed,
+                # which the fix-acceptance metric (spec §7) is computed
+                # against.
+                "agent_diff": proposed_fix.get("agent_diff") or proposed_fix.get("diff"),
+                # self_check_passed is never asserted by a human, for the same
+                # reason spec §6 forbids it being asserted by the LLM: an
+                # edited diff has not been through the scanner, so it cannot
+                # inherit a passing check. cleared is reset alongside it --
+                # neither half of the self-check is known until a scan
+                # actually runs against this diff. Any self_check_passed the
+                # client sent is ignored; this is computed, not accepted.
+                "self_check_passed": False,
+                "self_check_new_findings": [],
+                "cleared": False,
+            }
+
         table.update_item(
             Key={"pk": f"PR#{pr_id}", "sk": f"FINDING#{finding_id}"},
-            UpdateExpression="SET #status = :status, updated_at = :now",
+            UpdateExpression=update_expression,
             ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={":status": status, ":now": now},
+            ExpressionAttributeValues=values,
         )
 
     return _ok({

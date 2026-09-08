@@ -71,3 +71,23 @@ output "dashboard_distribution_id" {
 output "dashboard_url" {
   value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
 }
+
+# Dashboard build-time config -- copy these into dashboard/.env:
+#   VITE_COGNITO_DOMAIN, VITE_COGNITO_CLIENT_ID
+output "cognito_hosted_ui_domain" {
+  value = "${aws_cognito_user_pool_domain.dashboard.domain}.auth.${var.aws_region}.amazoncognito.com"
+}
+
+output "cognito_dashboard_client_id" {
+  value = aws_cognito_user_pool_client.dashboard.id
+}
+
+output "cognito_user_pool_id" {
+  value = aws_cognito_user_pool.dashboard.id
+}
+
+# Used only by smoke tests that mint a token without a browser:
+#   aws cognito-idp admin-initiate-auth --auth-flow ADMIN_USER_PASSWORD_AUTH #     --user-pool-id "$(terraform output -raw cognito_user_pool_id)" #     --client-id "$(terraform output -raw cognito_cli_client_id)" #     --auth-parameters "USERNAME=$EMAIL,PASSWORD=$PASSWORD"
+output "cognito_cli_client_id" {
+  value = aws_cognito_user_pool_client.cli.id
+}

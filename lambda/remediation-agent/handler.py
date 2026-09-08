@@ -98,11 +98,13 @@ def _remediate_finding(pr_id, finding):
     rescan_findings = _invoke_self_check(pr_id, finding_id)
 
     baseline_pairs = _query_baseline_pairs(pr_id, file_path)
-    self_check_passed, self_check_new_findings = _evaluate_self_check(
+    self_check_passed, self_check_new_findings, cleared = _evaluate_self_check(
         finding, rescan_findings, baseline_pairs
     )
 
-    _write_result(finding, diff_text, rationale, self_check_passed, self_check_new_findings)
+    _write_result(
+        finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared
+    )
     return self_check_passed
 
 
@@ -258,10 +260,19 @@ def _evaluate_self_check(finding, rescan_findings, baseline_pairs):
 
     self_check_passed = cleared and no_new_findings
     self_check_new_findings = sorted(f"{source}:{rule_id}" for source, rule_id in new_pairs)
-    return self_check_passed, self_check_new_findings
+    # cleared is returned separately from self_check_passed because a failed
+    # self-check has two different meanings a reviewer needs told apart: the
+    # fix missed the original finding entirely (cleared=False), or it cleared
+    # the original but brought new findings with it (cleared=True) -- the
+    # latter is often one edit away from passing, the former is not. Losing
+    # this distinction and collapsing both into "self-check failed" is
+    # actively misleading, not just less informative.
+    return self_check_passed, self_check_new_findings, cleared
 
 
-def _write_result(finding, diff_text, rationale, self_check_passed, self_check_new_findings):
+def _write_result(
+    finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared
+):
     table = dynamodb.Table(DYNAMODB_TABLE)
     table.update_item(
         Key={"pk": finding["pk"], "sk": finding["sk"]},
@@ -273,6 +284,7 @@ def _write_result(finding, diff_text, rationale, self_check_passed, self_check_n
                 "rationale": rationale,
                 "self_check_passed": self_check_passed,
                 "self_check_new_findings": self_check_new_findings,
+                "cleared": cleared,
             },
             ":status": "fix-proposed" if self_check_passed else "needs-human-only",
             ":now": datetime.now(timezone.utc).isoformat(),

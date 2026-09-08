@@ -6,6 +6,7 @@ import type {
   ReviewAction,
   ReviewResponse,
 } from '../types/finding'
+import { readToken } from '../auth/token'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') ?? ''
 
@@ -31,10 +32,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     )
   }
 
+  const token = readToken()
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
+      // Every route requires this. Its absence here means either the session
+      // expired between page load and this call, or auth was never set up --
+      // both surface as the same 401 apiConfigured() can't detect in advance.
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
   })
@@ -68,7 +75,10 @@ export function listEvents(prId: string, findingId: string): Promise<EventsListR
 export function postReview(
   prId: string,
   findingId: string,
-  payload: { action: ReviewAction; actor: string; notes?: string },
+  // No actor field: the API derives the reviewer's identity from the bearer
+  // token (see review-api's _actor_from_claims), not from anything the client
+  // sends. Passing one here would be silently ignored.
+  payload: { action: ReviewAction; notes?: string; edited_diff?: string },
 ): Promise<ReviewResponse> {
   return request<ReviewResponse>(
     `/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(findingId)}/review`,

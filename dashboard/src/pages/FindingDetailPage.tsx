@@ -21,6 +21,7 @@ export function FindingDetailPage() {
   const [loading, setLoading] = useState(true)
   const [eventsLoading, setEventsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showAgentDiff, setShowAgentDiff] = useState(false)
 
   const loadFinding = useCallback(async () => {
     if (!prId || !findingId) return
@@ -55,11 +56,12 @@ export function FindingDetailPage() {
 
   async function handleReview(payload: {
     action: 'approved' | 'edited' | 'rejected'
-    actor: string
     notes: string
+    edited_diff?: string
   }) {
     if (!prId || !findingId) return
     await postReview(prId, findingId, payload)
+    setShowAgentDiff(false)
     await Promise.all([loadFinding(), loadEvents()])
   }
 
@@ -138,19 +140,42 @@ export function FindingDetailPage() {
         <section className="panel">
           <h2>Remediation rationale</h2>
           <p>{finding.proposed_fix.rationale}</p>
-          {finding.proposed_fix.self_check_new_findings &&
-            finding.proposed_fix.self_check_new_findings.length > 0 && (
-              <div className="alert alert--warn">
-                <strong>New findings from self-check:</strong>
-                <ul>
-                  {finding.proposed_fix.self_check_new_findings.map((id) => (
-                    <li key={id}>
-                      <code>{id}</code>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+
+          {finding.proposed_fix.self_check_passed === false && (
+            <div className="alert alert--warn">
+              {/* cleared distinguishes two different failures: the fix missed
+                  the original finding, or it cleared the original but
+                  introduced new ones. The second is often one edit away from
+                  passing; the first is not. Reporting both as a single
+                  generic "self-check failed" understates the second case. */}
+              {finding.proposed_fix.cleared === false ? (
+                <p>
+                  <strong>The rescan still reports this finding</strong> — the fix did not clear it.
+                  Do not apply as-is.
+                </p>
+              ) : finding.proposed_fix.cleared === true ? (
+                <p>
+                  <strong>The rescan confirmed this finding cleared</strong>, but the fix introduced
+                  new findings. Do not apply as-is without addressing them.
+                </p>
+              ) : (
+                <p>The scanner did not confirm this fix. Do not apply as-is.</p>
+              )}
+              {finding.proposed_fix.self_check_new_findings &&
+                finding.proposed_fix.self_check_new_findings.length > 0 && (
+                  <>
+                    <strong>New findings from self-check:</strong>
+                    <ul>
+                      {finding.proposed_fix.self_check_new_findings.map((id) => (
+                        <li key={id}>
+                          <code>{id}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+            </div>
+          )}
         </section>
       )}
 
@@ -166,14 +191,33 @@ export function FindingDetailPage() {
 
       {showDiff && (
         <section className="panel">
-          <h2>Proposed diff</h2>
-          <DiffViewer diff={finding.proposed_fix?.diff} fileName={finding.file} />
+          <div className="panel__header">
+            <h2>Proposed diff</h2>
+            {finding.proposed_fix?.agent_diff && (
+              <button
+                type="button"
+                className="btn btn--secondary btn--small"
+                onClick={() => setShowAgentDiff((shown) => !shown)}
+              >
+                {showAgentDiff ? "Show reviewer's edit" : "Show agent's original"}
+              </button>
+            )}
+          </div>
+          <DiffViewer
+            diff={
+              showAgentDiff && finding.proposed_fix?.agent_diff
+                ? finding.proposed_fix.agent_diff
+                : finding.proposed_fix?.diff
+            }
+            fileName={finding.file}
+          />
         </section>
       )}
 
       {canReview && (
         <ReviewActions
           disabled={finding.status === 'raw' || finding.status === 'mapped'}
+          currentDiff={finding.proposed_fix?.diff}
           onSubmit={handleReview}
         />
       )}

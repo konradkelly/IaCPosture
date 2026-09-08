@@ -10,12 +10,26 @@ The dashboard talks to the `review-api` Lambda via API Gateway HTTP API. It does
 cd dashboard
 npm install
 cp .env.example .env
-# Edit .env — set VITE_API_BASE_URL to your deployed endpoint:
-#   terraform output -raw review_api_endpoint
+# Edit .env — VITE_API_BASE_URL, VITE_COGNITO_DOMAIN, VITE_COGNITO_CLIENT_ID,
+# all printed by:
+#   terraform output
 npm run dev
 ```
 
-Open http://localhost:5173, enter a PR ID (e.g. `manual-test-1`), and review findings.
+Open http://localhost:5173. You'll be redirected to the Cognito Hosted UI to
+sign in — reviewer accounts are created out of band, there is no
+self-registration:
+
+```bash
+aws cognito-idp admin-create-user \
+  --user-pool-id "$(terraform output -raw cognito_user_pool_id)" \
+  --username you@example.com \
+  --user-attributes Name=email,Value=you@example.com Name=email_verified,Value=true
+```
+
+Cognito emails a temporary password; the Hosted UI prompts for a permanent one
+on first sign-in. After that, enter a PR ID (e.g. `manual-test-1`) and review
+findings.
 
 ## API routes consumed
 
@@ -34,15 +48,25 @@ npm run build
 
 Output goes to `dist/` — ready for S3 + CloudFront when infra is added.
 
-## Security note
+## Auth
 
-v1 has **no authentication**. The API Gateway endpoint is unauthenticated per spec (Cognito deferred to v1.1). Keep the invoke URL private during development. CORS is configured via `dashboard_allowed_origins` in Terraform.
+Every API route sits behind a Cognito JWT authorizer (see `terraform/cognito.tf`
+and `terraform/api_gateway.tf`). The dashboard signs in through the Hosted UI
+with authorization-code + PKCE (`src/auth/`) and sends the ID token as a bearer
+token on every request. The reviewer attributed in the audit trail comes from
+the token's verified claims, not from anything the browser sends in the request
+body -- see `_actor_from_claims` in `lambda/review-api/handler.py`.
+
+CORS and the Hosted UI's callback/logout URLs both derive from
+`dashboard_extra_origins` plus the CloudFront domain (`terraform/cognito.tf`
+locals); they can't drift apart.
 
 ## Project structure
 
 ```
 src/
-├── api/client.ts          # Typed fetch wrapper
+├── api/client.ts          # Typed fetch wrapper, attaches the bearer token
+├── auth/                  # Cognito Hosted UI login (PKCE), token storage
 ├── types/finding.ts       # FindingRecord + ReviewEvent types
 ├── components/            # UI pieces (table, diff, review form, audit)
 └── pages/                 # Home, PR list, finding detail

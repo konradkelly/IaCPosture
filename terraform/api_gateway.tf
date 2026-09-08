@@ -3,11 +3,10 @@
 # HTTP API rather than REST: the spec leaves the choice open, and nothing here
 # needs REST's extra surface (request validators, usage plans, API keys).
 #
-# SECURITY: this API is UNAUTHENTICATED. Spec §4.1 defers Cognito to v1.1, so
-# that matches the plan, but what it serves is a list of unfixed
-# vulnerabilities and their locations. Add a JWT authorizer
-# (aws_apigatewayv2_authorizer + authorizer_id per route) before anyone but us
-# can reach it; until then keep the invoke URL private.
+# Every route requires a Cognito ID token, validated by API Gateway's native
+# JWT authorizer before the Lambda is invoked (see cognito.tf for why this is
+# in v1 rather than v1.1). The handler reads the caller's identity from the
+# verified claims, so no route trusts a caller-supplied actor.
 
 resource "aws_apigatewayv2_api" "review" {
   name          = "${var.project}-${var.environment}-review-api"
@@ -15,9 +14,9 @@ resource "aws_apigatewayv2_api" "review" {
   description   = "Review dashboard API: list findings, fetch diffs, record approve/reject decisions"
 
   cors_configuration {
-    allow_origins = var.dashboard_allowed_origins
+    allow_origins = local.dashboard_origins
     allow_methods = ["GET", "POST", "OPTIONS"]
-    allow_headers = ["content-type"]
+    allow_headers = ["authorization", "content-type"]
     max_age       = 300
   }
 }
@@ -34,6 +33,25 @@ resource "aws_apigatewayv2_integration" "review_api" {
   integration_uri        = aws_lambda_function.review_api.invoke_arn
   payload_format_version = "2.0"
   timeout_milliseconds   = 12000
+}
+
+resource "aws_apigatewayv2_authorizer" "cognito" {
+  api_id           = aws_apigatewayv2_api.review.id
+  name             = "${var.project}-${var.environment}-cognito"
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+
+  jwt_configuration {
+    # Both clients: the dashboard's browser PKCE client and the CLI client used
+    # to mint tokens for smoke tests. ID tokens carry aud = client_id, which is
+    # why the dashboard sends the id_token rather than the access token -- and
+    # why the access token, whose aud is absent, would be rejected here.
+    audience = [
+      aws_cognito_user_pool_client.dashboard.id,
+      aws_cognito_user_pool_client.cli.id,
+    ]
+    issuer = "https://${aws_cognito_user_pool.dashboard.endpoint}"
+  }
 }
 
 # One route per operation rather than a $default catch-all, so an unknown path
@@ -53,6 +71,9 @@ resource "aws_apigatewayv2_route" "review_api" {
   api_id    = aws_apigatewayv2_api.review.id
   route_key = each.value
   target    = "integrations/${aws_apigatewayv2_integration.review_api.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_apigatewayv2_stage" "review" {
@@ -71,6 +92,9 @@ resource "aws_apigatewayv2_stage" "review" {
       responseLength   = "$context.responseLength"
       responseLatency  = "$context.responseLatency"
       integrationError = "$context.integrationErrorMessage"
+      # Who the gateway authenticated, independent of anything the request body
+      # claimed. Empty on a 401, which is how a rejected token is spotted here.
+      sub = "$context.authorizer.claims.sub"
     })
   }
 }
@@ -86,3 +110,8 @@ resource "aws_lambda_permission" "review_api_gateway" {
   # Scoped to this API; the trailing wildcard covers every stage/method/path.
   source_arn = "${aws_apigatewayv2_api.review.execution_arn}/*/*"
 }
+
+# Note on preflight: cors_configuration answers OPTIONS at the gateway before
+# the authorizer runs, which is required -- a browser preflight carries no
+# Authorization header and would otherwise get a 401 the browser reports as an
+# opaque CORS failure.

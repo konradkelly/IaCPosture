@@ -40,10 +40,11 @@ def test_self_check_clean_fix_single_rule_clears():
     finding = next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption")
     baseline_pairs = _pairs(before)
 
-    passed, new_findings = handler._evaluate_self_check(finding, after["findings"], baseline_pairs)
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, after["findings"], baseline_pairs)
 
     assert passed is True
     assert new_findings == []
+    assert cleared is True
 
 
 @pytest.mark.parametrize("rule_id", ["CKV_AWS_24", "aws-ec2-no-public-ingress-sgr"])
@@ -53,10 +54,11 @@ def test_self_check_clean_fix_clears_multiple_sources_at_once(rule_id):
     finding = next(f for f in before["findings"] if f["rule_id"] == rule_id)
     baseline_pairs = _pairs(before)
 
-    passed, new_findings = handler._evaluate_self_check(finding, after["findings"], baseline_pairs)
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, after["findings"], baseline_pairs)
 
     assert passed is True
     assert new_findings == []
+    assert cleared is True
 
 
 def test_self_check_fails_when_original_finding_not_cleared():
@@ -65,10 +67,12 @@ def test_self_check_fails_when_original_finding_not_cleared():
     baseline_pairs = _pairs(before)
 
     # Rescan identical to the baseline -- as if the "fix" changed nothing.
-    passed, new_findings = handler._evaluate_self_check(finding, before["findings"], baseline_pairs)
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, before["findings"], baseline_pairs)
 
     assert passed is False
     assert new_findings == []
+    # The failing half: the finding is still there.
+    assert cleared is False
 
 
 def test_self_check_fails_when_fix_introduces_a_new_finding():
@@ -81,10 +85,14 @@ def test_self_check_fails_when_fix_introduces_a_new_finding():
         {"source": "tfsec", "rule_id": "aws-s3-new-thing-introduced-by-fix"}
     ]
 
-    passed, new_findings = handler._evaluate_self_check(finding, rescan_findings, baseline_pairs)
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, rescan_findings, baseline_pairs)
 
     assert passed is False
     assert new_findings == ["tfsec:aws-s3-new-thing-introduced-by-fix"]
+    # The other failure mode: the original cleared, the fix just brought new
+    # findings with it. Collapsing this into "self-check failed" like cleared
+    # is False would misreport a fix that's most of the way there.
+    assert cleared is True
 
 
 # ---------- _compute_diff ----------
@@ -155,6 +163,7 @@ def test_handler_marks_fix_proposed_on_clean_self_check(mock_dynamodb, mock_s3, 
     proposed_fix = update_kwargs["ExpressionAttributeValues"][":pf"]
     assert proposed_fix["self_check_passed"] is True
     assert proposed_fix["self_check_new_findings"] == []
+    assert proposed_fix["cleared"] is True
 
 
 @patch.object(handler, "_get_anthropic_client")
@@ -202,6 +211,7 @@ def test_handler_marks_needs_human_only_when_fix_does_not_clear_finding(
     update_kwargs = mock_table.update_item.call_args.kwargs
     assert update_kwargs["ExpressionAttributeValues"][":status"] == "needs-human-only"
     assert update_kwargs["ExpressionAttributeValues"][":pf"]["self_check_passed"] is False
+    assert update_kwargs["ExpressionAttributeValues"][":pf"]["cleared"] is False
 
 
 @patch.object(handler, "_get_anthropic_client")

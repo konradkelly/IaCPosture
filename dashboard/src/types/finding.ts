@@ -19,9 +19,21 @@ export interface ControlMapping {
 
 export interface ProposedFix {
   diff?: string
+  /** The agent's original diff, preserved the first time a reviewer edits the
+   *  fix and never overwritten afterwards. Null/absent until an edit happens
+   *  -- that's what lets the UI offer an "agent's original / reviewer's edit"
+   *  toggle only when there's something to toggle to. */
+  agent_diff?: string | null
   rationale?: string
   self_check_passed?: boolean
   self_check_new_findings?: string[]
+  /** Whether the rescan confirmed the original finding is gone -- distinct
+   *  from self_check_passed, which also requires no new findings. A fix can
+   *  clear the original and still fail the self-check by introducing new
+   *  ones; without this field that case is indistinguishable from a fix that
+   *  missed the original entirely. Absent on records written before this
+   *  field existed. */
+  cleared?: boolean
 }
 
 export interface Finding {
@@ -49,6 +61,10 @@ export interface ReviewEvent {
   actor: string
   action: ReviewAction
   notes?: string
+  /** The diff a reviewer submitted with an "edited" decision, stored verbatim
+   *  on the event so the audit record is self-contained even if the finding
+   *  itself is edited again later. */
+  edited_diff?: string | null
   created_at: string
 }
 

@@ -28,8 +28,8 @@ variable "remediation_agent_model" {
   default     = "claude-opus-5"
 }
 
-variable "dashboard_allowed_origins" {
-  description = "CORS allow-list for the review API. Defaults to '*' because the dashboard has no CloudFront domain yet; narrow it to that origin once it exists. CORS is a browser convention, not access control -- it does not replace the JWT authorizer noted in api_gateway.tf."
+variable "dashboard_extra_origins" {
+  description = "Origins allowed to call the review API and complete a Cognito login, in addition to the CloudFront distribution (which is always allowed). Defaults to the Vite dev server so `npm run dev` works against deployed infrastructure; set to [] for an environment that should only be reachable through CloudFront. Note these are browser conventions, not access control -- the JWT authorizer in api_gateway.tf is what actually gates the API."
   type        = list(string)
-  default     = ["*"]
+  default     = ["http://localhost:5173"]
 }
