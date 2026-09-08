@@ -87,7 +87,7 @@ def test_get_finding_404s_when_absent(mock_table):
     assert response["statusCode"] == 404
 
 
-def test_list_events_reads_the_finding_partition_not_the_pr(mock_table):
+def test_list_events_reads_the_finding_partition_scoped_to_its_pr(mock_table):
     mock_table.query.return_value = {"Items": []}
 
     handler.handler(
@@ -96,8 +96,34 @@ def test_list_events_reads_the_finding_partition_not_the_pr(mock_table):
     )
 
     values = mock_table.query.call_args.kwargs["ExpressionAttributeValues"]
-    assert values[":pk"] == "FINDING#abc123"
+    assert values[":pk"] == "PR#manual-1#FINDING#abc123"
     assert values[":sk_prefix"] == "EVENT#"
+
+
+def test_audit_trails_do_not_bleed_between_prs_sharing_a_finding_id(mock_table):
+    """finding_id is a content hash, so the same rule on the same file yields
+    the same id in every PR that scans it. A decision recorded on one PR must
+    not appear in another PR's audit trail."""
+    mock_table.get_item.return_value = {"Item": FINDING}
+
+    handler.handler(
+        _event("POST /prs/{pr_id}/findings/{finding_id}/review",
+               {"pr_id": "demo-1", "finding_id": "shared-id"},
+               {"action": "approved"}),
+        None,
+    )
+    written_pk = mock_table.put_item.call_args.kwargs["Item"]["pk"]
+
+    mock_table.query.return_value = {"Items": []}
+    handler.handler(
+        _event("GET /prs/{pr_id}/findings/{finding_id}/events",
+               {"pr_id": "other-pr", "finding_id": "shared-id"}),
+        None,
+    )
+    read_pk = mock_table.query.call_args.kwargs["ExpressionAttributeValues"][":pk"]
+
+    assert written_pk == "PR#demo-1#FINDING#shared-id"
+    assert read_pk != written_pk
 
 
 def test_unknown_route_404s(mock_table):
@@ -123,7 +149,7 @@ def test_approve_writes_an_audit_event_and_resolves_the_finding(mock_table):
     assert _body(response)["status"] == "resolved"
 
     event_item = mock_table.put_item.call_args.kwargs["Item"]
-    assert event_item["pk"] == "FINDING#abc123"
+    assert event_item["pk"] == "PR#manual-1#FINDING#abc123"
     assert event_item["sk"].startswith("EVENT#")
     assert event_item["actor"] == "konrad@example.com"
     assert event_item["action"] == "approved"

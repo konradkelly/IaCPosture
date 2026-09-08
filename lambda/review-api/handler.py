@@ -61,7 +61,7 @@ def handler(event, context):
             return _ok(finding)
 
         if route_key == "GET /prs/{pr_id}/findings/{finding_id}/events":
-            return _ok(_list_events(params["finding_id"]))
+            return _ok(_list_events(params["pr_id"], params["finding_id"]))
 
         if route_key == "POST /prs/{pr_id}/findings/{finding_id}/review":
             return _post_review(
@@ -114,14 +114,28 @@ def _get_finding(pr_id, finding_id):
     return response.get("Item")
 
 
-def _list_events(finding_id):
-    """Audit trail for one finding. ReviewEvents live under their own
-    partition (pk = FINDING#<id>, spec §5), not under the PR's."""
+def _event_pk(pr_id, finding_id):
+    """Partition key for one finding's audit trail.
+
+    Includes pr_id, which spec §5's `FINDING#<finding_id>` shorthand omits.
+    finding_id is a content hash of the finding, so the identical rule on the
+    identical file produces the identical id in every PR that scans it -- ids
+    are unique within a PR, not across them. Keyed on finding_id alone, a
+    decision recorded against one PR surfaces in the audit trail of every
+    other PR that happens to contain the same finding, attributing decisions
+    nobody made on that PR. For an audit log whose purpose is that nothing is
+    silently decided, that's the one failure it cannot have.
+    """
+    return f"PR#{pr_id}#FINDING#{finding_id}"
+
+
+def _list_events(pr_id, finding_id):
+    """Audit trail for one finding, scoped to the PR it was decided on."""
     table = dynamodb.Table(DYNAMODB_TABLE)
     items = _query_all(
         table,
         KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
-        ExpressionAttributeValues={":pk": f"FINDING#{finding_id}", ":sk_prefix": "EVENT#"},
+        ExpressionAttributeValues={":pk": _event_pk(pr_id, finding_id), ":sk_prefix": "EVENT#"},
     )
     return {"finding_id": finding_id, "count": len(items), "events": items}
 
@@ -169,7 +183,7 @@ def _post_review(pr_id, finding_id, raw_body, event):
     # change) rather than the reverse -- a state change nobody logged, which
     # is the failure mode spec §1 forbids.
     table.put_item(Item={
-        "pk": f"FINDING#{finding_id}",
+        "pk": _event_pk(pr_id, finding_id),
         "sk": f"EVENT#{now}",
         "finding_id": finding_id,
         "pr_id": pr_id,

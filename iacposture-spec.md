@@ -132,7 +132,7 @@ Each function stays comfortably under the layer size ceiling, and layer versions
 
 ## 5. Data Model
 
-Both item types below live in a **single DynamoDB table**, not two separate tables — this is the standard single-table design pattern for DynamoDB, where distinct entity types are distinguished by their key prefixes (`PR#`/`FINDING#` vs `FINDING#`/`EVENT#`) rather than by separate tables. This keeps related data queryable together (e.g. everything under one `PR#<pr_id>` partition) and avoids the cross-table joins DynamoDB isn't designed for.
+Both item types below live in a **single DynamoDB table**, not two separate tables — this is the standard single-table design pattern for DynamoDB, where distinct entity types are distinguished by their key prefixes (`PR#`/`FINDING#` vs `PR#…#FINDING#`/`EVENT#`) rather than by separate tables. This keeps related data queryable together (e.g. everything under one `PR#<pr_id>` partition) and avoids the cross-table joins DynamoDB isn't designed for.
 
 ```
 FindingRecord (DynamoDB)
@@ -145,16 +145,34 @@ FindingRecord (DynamoDB)
 ├── severity
 ├── control_mappings: [{ framework: "CIS-AWS" | "CIS-Kubernetes" | "OWASP-CICD" | "OWASP-CloudNative", control_id, control_text_ref (S3 key), citation_span }]
 ├── status: raw | mapped | fix-proposed | needs-human-only | resolved
-├── proposed_fix: { diff, rationale, self_check_passed, self_check_new_findings: [] }
+├── proposed_fix: { diff, rationale, self_check_passed, cleared, self_check_new_findings: [], agent_diff? }
 └── created_at, updated_at
 
 ReviewEvent (DynamoDB)
-├── pk: FINDING#<finding_id>
+├── pk: PR#<pr_id>#FINDING#<finding_id>
 ├── sk: EVENT#<timestamp>
-├── actor: reviewer id
+├── actor: reviewer id (from the verified JWT, never the request body)
 ├── action: approved | edited | rejected
+├── edited_diff: the reviewer's diff, on an "edited" action
 └── notes
 ```
+
+**Why `ReviewEvent.pk` carries `pr_id`.** An earlier draft keyed it on
+`FINDING#<finding_id>` alone. That is unsound: `finding_id` is a content hash
+of the finding, so the same rule on the same file yields the *same* id in
+every PR that scans it — ids are unique within a PR, not across them. Keyed on
+the id alone, a decision recorded against one PR appears in the audit trail of
+every other PR containing that finding, attributing decisions nobody made
+there. This was observed in practice, with one approval on `demo-1` showing up
+against `manual-test-1`. For a log whose entire purpose is that nothing is
+silently decided, misattribution is the one defect it cannot tolerate.
+
+**On `proposed_fix`:** `cleared` records whether the rescan confirmed the
+original finding gone, separately from `self_check_passed`, which also
+requires that no new findings appeared — a fix can clear the original and
+still fail, and the two failure modes need telling apart (§8.1). `agent_diff`
+preserves the agent's original diff the first time a reviewer edits the fix,
+so fix-acceptance (§7) stays measurable after an edit.
 
 ---
 
