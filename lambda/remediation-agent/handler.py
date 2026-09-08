@@ -58,9 +58,18 @@ def handler(event, context):
 
     fix_proposed_count = 0
     needs_human_count = 0
+    error_count = 0
 
     for finding in mapped_findings:
-        self_check_passed = _remediate_finding(pr_id, finding)
+        try:
+            self_check_passed = _remediate_finding(pr_id, finding)
+        except Exception:
+            # One finding's failure shouldn't abandon the rest of the batch.
+            # Status stays "mapped", so a re-run retries this finding.
+            logger.exception("remediation failed for finding %s", finding.get("finding_id"))
+            error_count += 1
+            continue
+
         if self_check_passed:
             fix_proposed_count += 1
         else:
@@ -70,6 +79,7 @@ def handler(event, context):
         "pr_id": pr_id,
         "fix_proposed_count": fix_proposed_count,
         "needs_human_only_count": needs_human_count,
+        "error_count": error_count,
     }
 
 
@@ -96,9 +106,25 @@ def _remediate_finding(pr_id, finding):
     return self_check_passed
 
 
+def _query_all(table, **kwargs):
+    """Query to exhaustion. A Query caps at 1MB of read items and applies
+    FilterExpression only afterwards, so one page can return few (or zero)
+    matches while more wait behind a continuation token. Under-reading the
+    baseline below would weaken the "no new findings" half of the self-check."""
+    items = []
+    while True:
+        response = table.query(**kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            return items
+        kwargs["ExclusiveStartKey"] = last_key
+
+
 def _query_mapped_findings(pr_id):
     table = dynamodb.Table(DYNAMODB_TABLE)
-    response = table.query(
+    return _query_all(
+        table,
         KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
         FilterExpression="#status = :status",
         ExpressionAttributeNames={"#status": "status"},
@@ -108,7 +134,6 @@ def _query_mapped_findings(pr_id):
             ":status": "mapped",
         },
     )
-    return response.get("Items", [])
 
 
 def _query_baseline_pairs(pr_id, file_path):
@@ -116,7 +141,8 @@ def _query_baseline_pairs(pr_id, file_path):
     regardless of status -- the "no new findings" check in step 7 needs the
     baseline scan's full finding set for the file, not just zero."""
     table = dynamodb.Table(DYNAMODB_TABLE)
-    response = table.query(
+    items = _query_all(
+        table,
         KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
         FilterExpression="#file = :file",
         ExpressionAttributeNames={"#file": "file"},
@@ -126,7 +152,7 @@ def _query_baseline_pairs(pr_id, file_path):
             ":file": file_path,
         },
     )
-    return {(item["source"], item["rule_id"]) for item in response.get("Items", [])}
+    return {(item["source"], item["rule_id"]) for item in items}
 
 
 def _fetch_original_content(pr_id, file_path):
@@ -159,7 +185,9 @@ def _call_remediation_agent(finding, original_content):
 
     response = _get_anthropic_client().messages.create(
         model=MODEL,
-        max_tokens=8192,
+        # Carries a whole rewritten .tf file -- a truncated response fails
+        # JSON parsing and wastes the finding's remediation attempt.
+        max_tokens=16000,
         output_config={
             "effort": "medium",
             "format": {"type": "json_schema", "schema": REMEDIATION_OUTPUT_SCHEMA},
@@ -184,8 +212,20 @@ def _compute_diff(original_content, corrected_content, file_path):
     return "".join(diff_lines)
 
 
+def _self_check_prefix(pr_id, finding_id):
+    """Scratch prefix for one finding's patched file.
+
+    A sibling of the PR's snapshot, not the `scans/<pr_id>/self-check-<id>/`
+    the build brief specifies: the scanner lists `scans/<pr_id>/` recursively
+    and takes every .tf under it, so nesting scratch copies there would make a
+    later scan read this agent's own patched files as source. Still under
+    `scans/*`, which is what the execution role grants.
+    """
+    return f"scans/self-checks/{pr_id}/{finding_id}/"
+
+
 def _upload_scratch_file(pr_id, finding_id, file_path, content):
-    key = f"scans/{pr_id}/self-check-{finding_id}/{file_path}"
+    key = f"{_self_check_prefix(pr_id, finding_id)}{file_path}"
     s3.put_object(Bucket=ARTIFACTS_BUCKET, Key=key, Body=content.encode("utf-8"))
     return key
 
@@ -193,7 +233,7 @@ def _upload_scratch_file(pr_id, finding_id, file_path, content):
 def _invoke_self_check(pr_id, finding_id):
     payload = {
         "pr_id": f"{pr_id}-self-check-{finding_id}",
-        "s3_prefix": f"scans/{pr_id}/self-check-{finding_id}/",
+        "s3_prefix": _self_check_prefix(pr_id, finding_id),
         "iac_type": "terraform",
         "persist": False,
     }

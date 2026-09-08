@@ -21,3 +21,15 @@ variable "mapping_agent_model" {
   type        = string
   default     = "claude-opus-5"
 }
+
+variable "remediation_agent_model" {
+  description = "Anthropic model ID for remediation-agent. Defaults to Opus: rewriting a Terraform file correctly and minimally is a harder task than mapping-agent's bounded classification, so the Opus default is easier to justify here. Override to trade fix quality for cost."
+  type        = string
+  default     = "claude-opus-5"
+}
+
+variable "dashboard_allowed_origins" {
+  description = "CORS allow-list for the review API. Defaults to '*' because the dashboard has no CloudFront domain yet; narrow it to that origin once it exists. CORS is a browser convention, not access control -- it does not replace the JWT authorizer noted in api_gateway.tf."
+  type        = list(string)
+  default     = ["*"]
+}

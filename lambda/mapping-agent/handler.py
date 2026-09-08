@@ -86,9 +86,24 @@ def handler(event, context):
     return {"pr_id": pr_id, "mapped_count": mapped_count, "skipped_count": skipped_count}
 
 
+def _query_all(table, **kwargs):
+    """Query to exhaustion. A Query caps at 1MB of read items and applies
+    FilterExpression only afterwards, so one page can return few (or zero)
+    matches while more wait behind a continuation token."""
+    items = []
+    while True:
+        response = table.query(**kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            return items
+        kwargs["ExclusiveStartKey"] = last_key
+
+
 def _query_raw_findings(pr_id):
     table = dynamodb.Table(DYNAMODB_TABLE)
-    response = table.query(
+    return _query_all(
+        table,
         KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
         FilterExpression="#status = :status",
         ExpressionAttributeNames={"#status": "status"},
@@ -98,7 +113,6 @@ def _query_raw_findings(pr_id):
             ":status": "raw",
         },
     )
-    return response.get("Items", [])
 
 
 def _load_rule_mappings():

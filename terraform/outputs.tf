@@ -38,3 +38,36 @@ output "mapping_agent_function_name" {
 output "mapping_agent_function_arn" {
   value = aws_lambda_function.mapping_agent.arn
 }
+
+output "remediation_agent_function_name" {
+  value = aws_lambda_function.remediation_agent.function_name
+}
+
+output "remediation_agent_function_arn" {
+  value = aws_lambda_function.remediation_agent.arn
+}
+
+output "review_api_function_name" {
+  value = aws_lambda_function.review_api.function_name
+}
+
+# Base URL the dashboard talks to, e.g.
+#   curl "$(terraform output -raw review_api_endpoint)/prs/manual-1/findings"
+output "review_api_endpoint" {
+  value = aws_apigatewayv2_stage.review.invoke_url
+}
+
+output "dashboard_bucket_name" {
+  value = aws_s3_bucket.dashboard.bucket
+}
+
+# Deploy the built dashboard:
+#   aws s3 sync dashboard/dist/ "s3://$(terraform output -raw dashboard_bucket_name)/" --delete
+#   aws cloudfront create-invalidation --distribution-id "$(terraform output -raw dashboard_distribution_id)" --paths '/*'
+output "dashboard_distribution_id" {
+  value = aws_cloudfront_distribution.dashboard.id
+}
+
+output "dashboard_url" {
+  value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
+}

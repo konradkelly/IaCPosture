@@ -1,0 +1,30 @@
+# Repo-wide safety net for secrets. The per-directory .gitignore files
+# (terraform/, layers/, lambda/*/, dashboard/) handle build artifacts; this one
+# makes sure a credential file dropped anywhere is ignored by default rather
+# than by remembering to add it.
+
+# Environment / secret files
+.env
+.env.*
+!.env.example
+*.local
+
+# Credentials and keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+.aws/
+.anthropic/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

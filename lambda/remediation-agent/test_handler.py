@@ -138,11 +138,16 @@ def test_handler_marks_fix_proposed_on_clean_self_check(mock_dynamodb, mock_s3, 
 
     result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
 
-    assert result == {"pr_id": "fixture-s3-enc-before", "fix_proposed_count": 1, "needs_human_only_count": 0}
+    assert result == {
+        "pr_id": "fixture-s3-enc-before",
+        "fix_proposed_count": 1,
+        "needs_human_only_count": 0,
+        "error_count": 0,
+    }
 
     mock_s3.put_object.assert_called_once()
     put_kwargs = mock_s3.put_object.call_args.kwargs
-    assert put_kwargs["Key"] == f"scans/fixture-s3-enc-before/self-check-{finding['finding_id']}/main.tf"
+    assert put_kwargs["Key"] == f"scans/self-checks/fixture-s3-enc-before/{finding['finding_id']}/main.tf"
 
     mock_table.update_item.assert_called_once()
     update_kwargs = mock_table.update_item.call_args.kwargs
@@ -187,8 +192,81 @@ def test_handler_marks_needs_human_only_when_fix_does_not_clear_finding(
 
     result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
 
-    assert result == {"pr_id": "fixture-s3-enc-before", "fix_proposed_count": 0, "needs_human_only_count": 1}
+    assert result == {
+        "pr_id": "fixture-s3-enc-before",
+        "fix_proposed_count": 0,
+        "needs_human_only_count": 1,
+        "error_count": 0,
+    }
 
     update_kwargs = mock_table.update_item.call_args.kwargs
     assert update_kwargs["ExpressionAttributeValues"][":status"] == "needs-human-only"
     assert update_kwargs["ExpressionAttributeValues"][":pf"]["self_check_passed"] is False
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_handler_isolates_a_failing_finding_and_keeps_going(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """One finding blowing up must not abandon the rest of the batch, and the
+    failed finding must keep status "mapped" so a re-run retries it."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    good = {**next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
+            "status": "mapped"}
+    doomed = {**next(f for f in before["findings"] if f["rule_id"] != "aws-s3-enable-bucket-encryption"),
+              "status": "mapped"}
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": [doomed, good]},     # _query_mapped_findings
+        {"Items": before["findings"]}, # _query_baseline_pairs, for `good`
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+
+    # The first finding's S3 fetch fails; the second succeeds.
+    mock_s3.get_object.side_effect = [
+        RuntimeError("NoSuchKey"),
+        {"Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())},
+    ]
+
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
+        "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+        "rationale": "Added a default SSE configuration for the bucket.",
+    })
+    mock_lambda_client.invoke.return_value = {
+        "Payload": SimpleNamespace(read=lambda: json.dumps(after).encode())
+    }
+
+    result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
+
+    assert result == {
+        "pr_id": "fixture-s3-enc-before",
+        "fix_proposed_count": 1,
+        "needs_human_only_count": 0,
+        "error_count": 1,
+    }
+    # Only the surviving finding got written back -- the failed one is untouched.
+    mock_table.update_item.assert_called_once()
+    assert mock_table.update_item.call_args.kwargs["Key"]["sk"] == good["sk"]
+
+
+# ---------- pagination ----------
+
+def test_query_all_follows_last_evaluated_key():
+    """DynamoDB applies FilterExpression after the 1MB read cap, so a page can
+    come back nearly empty with more matches still pending."""
+    table = MagicMock()
+    table.query.side_effect = [
+        {"Items": [{"n": 1}], "LastEvaluatedKey": {"pk": "PR#x", "sk": "FINDING#a"}},
+        {"Items": [{"n": 2}, {"n": 3}]},
+    ]
+
+    items = handler._query_all(table, KeyConditionExpression="pk = :pk")
+
+    assert items == [{"n": 1}, {"n": 2}, {"n": 3}]
+    assert table.query.call_count == 2
+    assert table.query.call_args.kwargs["ExclusiveStartKey"] == {"pk": "PR#x", "sk": "FINDING#a"}
