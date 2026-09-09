@@ -20,6 +20,19 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 WORK_DIR = "/tmp/scan-abc123"
 
+# Captured verbatim from the deployed terraform-scanner on 2026-09-09, invoked
+# against fixtures/unparseable/main.tf. tfsec does not report a parse failure as
+# JSON with empty results -- it prints this to stdout and abandons the scan. The
+# work dir is the real one from that run, kept so the path form (leading slash
+# stripped, unlike tfsec's findings) stays honest.
+TFSEC_WORK_DIR = "/tmp/scan-3e096e4b02db497fa9761136cbeed2e3"
+TFSEC_PARSE_FAILURE_STDOUT = (
+    "Error: scan failed: tmp/scan-3e096e4b02db497fa9761136cbeed2e3/main.tf:18,37-38: "
+    "Unclosed configuration block; There is no closing brace for this block before "
+    "the end of the file. This may be caused by incorrect brace nesting elsewhere "
+    "in this file.\n"
+)
+
 
 def _proc(stdout="", stderr="", returncode=0):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
@@ -54,11 +67,28 @@ def test_tfsec_producing_no_output_raises_rather_than_scanning_clean(mock_run):
 
 
 @patch.object(handler.subprocess, "run")
-def test_tfsec_producing_unparseable_output_raises(mock_run):
+def test_tfsec_output_that_is_neither_json_nor_a_parse_error_raises(mock_run):
+    """A genuine crash still has to raise -- only output that names the file it
+    choked on is downgraded to a reportable parse error."""
     mock_run.return_value = _proc(stdout="panic: runtime error\n", returncode=2)
 
     with pytest.raises(handler.ScannerError, match="unparseable"):
         handler._run_tfsec(WORK_DIR)
+
+
+@patch.object(handler.subprocess, "run")
+def test_tfsec_parse_failure_is_reported_not_raised(mock_run):
+    """Against the real captured output. Raising here would be safe but wrong:
+    remediation-agent turns a raised error into a retry with the finding left
+    at "mapped", so an agent that drops a brace would loop -- re-drafting, re-
+    failing, and costing a model call each time -- while no reviewer ever sees
+    it. Reported, it becomes needs-human-only with the reason attached."""
+    mock_run.return_value = _proc(stdout=TFSEC_PARSE_FAILURE_STDOUT, returncode=1)
+
+    results, parse_errors = handler._run_tfsec(TFSEC_WORK_DIR)
+
+    assert results == []
+    assert parse_errors == ["main.tf"]
 
 
 @patch.object(handler.subprocess, "run")
@@ -67,7 +97,7 @@ def test_tfsec_null_results_is_a_clean_scan_not_an_error(mock_run):
     above -- if this raised, every clean self-check would fail."""
     mock_run.return_value = _proc(stdout=json.dumps({"results": None}), returncode=0)
 
-    assert handler._run_tfsec(WORK_DIR) == []
+    assert handler._run_tfsec(WORK_DIR) == ([], [])
 
 
 @patch.object(handler.subprocess, "run")
@@ -107,6 +137,14 @@ def test_parse_errors_are_reported_relative_to_the_work_dir():
     assert handler._checkov_parse_errors(report, WORK_DIR) == ["main.tf", "modules/vpc/net.tf"]
 
 
+def test_paths_are_relativized_whether_or_not_the_leading_slash_survived():
+    """tfsec keeps the leading slash in its findings and drops it in its parse
+    errors, so both forms reach this from the same run."""
+    assert handler._relativize_path(f"{WORK_DIR}/main.tf", WORK_DIR) == "main.tf"
+    assert handler._relativize_path(f"{WORK_DIR.lstrip('/')}/main.tf", WORK_DIR) == "main.tf"
+    assert handler._relativize_path("/main.tf", WORK_DIR) == "main.tf"
+
+
 def test_a_clean_report_has_no_parse_errors():
     assert handler._checkov_parse_errors(_checkov_report(), WORK_DIR) == []
 
@@ -134,11 +172,11 @@ def test_handler_surfaces_parse_errors_without_discarding_real_findings(
     """One unparseable file among several doesn't invalidate the others'
     findings, so this is reported rather than raised."""
     mock_download.return_value = ["main.tf", "broken.tf"]
-    mock_tfsec.return_value = [{
+    mock_tfsec.return_value = ([{
         "long_id": "aws-s3-enable-bucket-encryption",
         "location": {"filename": "main.tf", "start_line": 1, "end_line": 3},
         "severity": "HIGH",
-    }]
+    }], [])
     mock_checkov.return_value = _checkov_report(parsing_errors=["broken.tf"])
 
     result = handler.handler({"pr_id": "pr-1", "s3_prefix": "scans/pr-1/"}, None)
@@ -156,7 +194,7 @@ def test_handler_reports_no_scan_errors_on_a_clean_scan(
     mock_download, mock_tfsec, mock_checkov, mock_write
 ):
     mock_download.return_value = ["main.tf"]
-    mock_tfsec.return_value = []
+    mock_tfsec.return_value = ([], [])
     mock_checkov.return_value = _checkov_report()
 
     result = handler.handler({"pr_id": "pr-1", "s3_prefix": "scans/pr-1/", "persist": False}, None)
@@ -164,6 +202,28 @@ def test_handler_reports_no_scan_errors_on_a_clean_scan(
     assert result["scan_errors"] == []
     assert result["findings"] == []
     mock_write.assert_not_called()
+
+
+@patch.object(handler, "_write_findings")
+@patch.object(handler, "_run_checkov")
+@patch.object(handler, "_run_tfsec")
+@patch.object(handler, "_download_snapshot")
+def test_handler_merges_parse_errors_from_both_tools(
+    mock_download, mock_tfsec, mock_checkov, mock_write
+):
+    """The two parsers disagree on what they can read, so neither alone is the
+    oracle -- and a file they both choke on must be listed once, not twice.
+
+    Paths are given already-relative here because handler() scans into a work
+    dir it names itself; relativizing the absolute forms the tools really emit
+    is covered by _relativize_path and _checkov_parse_errors directly."""
+    mock_download.return_value = ["main.tf", "odd.tf"]
+    mock_tfsec.return_value = ([], ["main.tf"])
+    mock_checkov.return_value = _checkov_report(parsing_errors=["main.tf", "odd.tf"])
+
+    result = handler.handler({"pr_id": "pr-1", "s3_prefix": "scans/pr-1/", "persist": False}, None)
+
+    assert result["scan_errors"] == ["main.tf", "odd.tf"]
 
 
 @patch.object(handler, "_run_tfsec")

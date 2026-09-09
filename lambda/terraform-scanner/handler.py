@@ -22,14 +22,16 @@ files the scanner could not parse. It is not cosmetic: a file that fails to
 parse produces no findings, and remediation-agent's self-check reads "no
 findings" as proof that a fix cleared its finding. A caller that ignores
 scan_errors will read an unparseable file as a clean one. A tool that fails
-outright (no output, unparseable output) raises ScannerError instead -- that
-is a scan that did not happen, not a scan with a result.
+outright (no output, or output that is neither JSON nor a recognised parse
+error) raises ScannerError instead -- that is a scan that did not happen, not
+a scan with a result.
 """
 
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -54,6 +56,15 @@ SCAN_TIMEOUT_SECONDS = 240
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
+
+
+# tfsec reports an HCL parse failure as plain text on stdout rather than JSON,
+# and abandons the whole scan rather than skipping the one file:
+#   Error: scan failed: tmp/scan-<id>/main.tf:18,37-38: Unclosed configuration
+#   block; There is no closing brace for this block before the end of the file.
+# Captured from the deployed function on 2026-09-09. Note the path has had its
+# leading slash stripped, which is why _relativize_path has to match both forms.
+TFSEC_PARSE_ERROR_RE = re.compile(r"([^\s:]+\.tf):\d+,\d+-\d+:")
 
 
 class ScannerError(RuntimeError):
@@ -86,19 +97,19 @@ def handler(event, context):
         if not downloaded:
             raise ValueError(f"no .tf files found under s3://{ARTIFACTS_BUCKET}/{s3_prefix}")
 
-        tfsec_results = _run_tfsec(work_dir)
+        tfsec_results, tfsec_parse_errors = _run_tfsec(work_dir)
         checkov_report = _run_checkov(work_dir)
 
         findings = _normalize_tfsec(tfsec_results, pr_id, work_dir) + _normalize_checkov(checkov_report, pr_id)
 
-        scan_errors = _checkov_parse_errors(checkov_report, work_dir)
+        scan_errors = sorted(set(tfsec_parse_errors) | set(_checkov_parse_errors(checkov_report, work_dir)))
         if scan_errors:
             # Reported, not raised: the other files in the snapshot scanned
             # fine and their findings are real. Raising would throw those away
             # over one bad file. It is the caller's job to decide what an
             # unscannable file means -- for remediation-agent's self-check it
             # is fatal, for a baseline scan it is a warning.
-            logger.warning("checkov could not parse %d file(s): %s", len(scan_errors), scan_errors)
+            logger.warning("could not parse %d file(s): %s", len(scan_errors), scan_errors)
 
         if persist:
             _write_findings(findings)
@@ -130,6 +141,7 @@ def _download_snapshot(bucket, prefix, dest_dir):
 
 
 def _run_tfsec(work_dir):
+    """Returns (results, parse_errors)."""
     proc = subprocess.run(
         [TFSEC_BIN, work_dir, "--format", "json", "--no-color"],
         capture_output=True,
@@ -147,9 +159,22 @@ def _run_tfsec(work_dir):
     try:
         parsed = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise ScannerError(f"tfsec produced unparseable output: {proc.stdout[:500]}") from exc
+        parse_errors = sorted({
+            _relativize_path(path, work_dir)
+            for path in TFSEC_PARSE_ERROR_RE.findall(proc.stdout)
+        })
+        if not parse_errors:
+            raise ScannerError(f"tfsec produced unparseable output: {proc.stdout[:500]}") from exc
+        # A parse failure is reported, not raised, for the same reason
+        # checkov's is: the caller decides what an unscannable file means.
+        # Unlike checkov, tfsec abandons the entire scan rather than skipping
+        # the one file, so no tfsec results survive for the other files in the
+        # snapshot either -- coverage is degraded snapshot-wide, and saying so
+        # is exactly what reporting rather than raising makes possible.
+        logger.warning("tfsec could not parse %s; abandoned the scan", parse_errors)
+        return [], parse_errors
     # "results": null is tfsec's clean scan, distinct from the failures above.
-    return parsed.get("results") or []
+    return parsed.get("results") or [], []
 
 
 def _run_checkov(work_dir):
@@ -181,13 +206,15 @@ def _run_checkov(work_dir):
 def _relativize_path(file_path, work_dir):
     """Strip the scratch directory back off a path a tool reported.
 
-    Handles both forms the tools emit: tfsec echoes the absolute path it was
-    invoked with (work_dir/main.tf), and checkov's parsing_errors carry the
-    same, while its check records are already root-relative (/main.tf).
+    Handles every form the tools emit: tfsec echoes the absolute path it was
+    invoked with in its findings (/tmp/scan-x/main.tf) but drops the leading
+    slash in its parse errors (tmp/scan-x/main.tf); checkov's parsing_errors
+    carry the absolute path, while its check records are already root-relative
+    (/main.tf).
     """
-    prefix = work_dir.rstrip("/") + "/"
-    if file_path.startswith(prefix):
-        return file_path[len(prefix):]
+    for prefix in (work_dir.rstrip("/") + "/", work_dir.strip("/") + "/"):
+        if file_path.startswith(prefix):
+            return file_path[len(prefix):]
     return file_path.lstrip("/")
 
 
@@ -212,10 +239,11 @@ def _normalize_tfsec(results, pr_id, work_dir):
 def _checkov_parse_errors(report, work_dir):
     """Files checkov could not parse, relative to work_dir.
 
-    checkov is the parse oracle here because it is the only one of the two
-    tools that reports the failure as data: tfsec writes parse trouble to
-    stderr and still emits a well-formed (empty) result set, which is
-    indistinguishable from a clean scan at this layer.
+    Both tools are consulted, because they fail differently: tfsec aborts the
+    whole scan and says so in plain text (see TFSEC_PARSE_ERROR_RE), while
+    checkov skips the file, scans the rest, and reports the casualty here as
+    data. checkov is therefore the only source for a file that it alone cannot
+    read -- the two parsers do not agree on every input.
 
     A file that fails to parse contributes no findings, so without this a
     syntactically broken .tf scans exactly like a compliant one -- and
