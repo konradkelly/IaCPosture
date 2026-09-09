@@ -220,6 +220,12 @@ def _post_review(pr_id, finding_id, raw_body, event):
                 "self_check_passed": False,
                 "self_check_new_findings": [],
                 "cleared": False,
+                # Reset for the same reason, and load-bearing in the other
+                # direction: a reviewer's most likely response to "the fix did
+                # not parse" is to hand-correct the syntax, and carrying the
+                # agent's parse failure onto their edit would keep reporting a
+                # file that no longer exists as broken.
+                "scan_errors": [],
             }
 
         table.update_item(

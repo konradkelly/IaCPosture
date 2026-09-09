@@ -160,6 +160,29 @@ export function FindingDetailPage() {
               </div>
             )}
 
+          {finding.proposed_fix.scan_errors &&
+            finding.proposed_fix.scan_errors.length > 0 && (
+              <div className="alert alert--error">
+                <p>
+                  <strong>The scanner could not parse this fix, so nothing was verified.</strong>{' '}
+                  A file that does not parse produces no findings — which looks identical to a
+                  finding that was cleared. The self-check was stopped rather than allowed to read
+                  that silence as success.
+                </p>
+                <ul>
+                  {finding.proposed_fix.scan_errors.map((f) => (
+                    <li key={f}>
+                      <code>{f}</code>
+                    </li>
+                  ))}
+                </ul>
+                <p>
+                  The diff below is the agent's attempt, unverified. Treat it as a starting point,
+                  not a proposal that passed anything.
+                </p>
+              </div>
+            )}
+
           {finding.proposed_fix.dropped_resources &&
             finding.proposed_fix.dropped_resources.length > 0 && (
               <div className="alert alert--warn">
@@ -197,6 +220,7 @@ export function FindingDetailPage() {
 
           {finding.proposed_fix.self_check_passed === false &&
             !finding.proposed_fix.suppression_attempt?.length &&
+            !finding.proposed_fix.scan_errors?.length &&
             !finding.proposed_fix.dropped_resources?.length &&
             !finding.proposed_fix.assumptions?.length && (
             <div className="alert alert--warn">

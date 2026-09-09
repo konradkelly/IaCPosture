@@ -8,6 +8,13 @@ terraform-scanner (persist=false) against the patched content and comparing
 here, never asserted by the LLM -- that's the project's core integrity
 guarantee.
 
+Computing it from the rescan is only sound while the rescan actually happened.
+A scanner that crashed, and a file the scanner could not parse, both report
+zero findings, which the comparison would read as the finding having been
+cleared. So a failed invocation is raised (the finding stays "mapped" for a
+retry) and a reported parse error short-circuits to needs-human-only before
+any verdict is computed.
+
 Event shape:
 { "pr_id": "manual-test-1" }
 """
@@ -129,7 +136,24 @@ def _remediate_finding(pr_id, finding):
         return False
 
     _upload_scratch_file(pr_id, finding_id, file_path, corrected_content)
-    rescan_findings = _invoke_self_check(pr_id, finding_id)
+    rescan_findings, scan_errors = _invoke_self_check(pr_id, finding_id)
+
+    # The scanner could not parse what the agent wrote. An unparseable file
+    # yields no findings, and _evaluate_self_check reads no findings as "the
+    # rule stopped firing" -- so a fix that breaks the syntax outright would
+    # otherwise come back self_check_passed=True, exactly the false pass the
+    # suppression gate above exists to prevent. Nothing was proven here, so
+    # there is no verdict to compute: return before evaluating.
+    if scan_errors:
+        logger.warning(
+            "remediation for finding %s did not parse: %s", finding_id, scan_errors,
+        )
+        _write_result(
+            finding, diff_text, rationale,
+            self_check_passed=False, self_check_new_findings=[], cleared=False,
+            assumptions=assumptions, scan_errors=scan_errors,
+        )
+        return False
 
     baseline_counts = _query_baseline_counts(pr_id, file_path)
     self_check_passed, self_check_new_findings, cleared = _evaluate_self_check(
@@ -402,8 +426,14 @@ def _invoke_self_check(pr_id, finding_id):
     )
     result = json.loads(response["Payload"].read())
     if "FunctionError" in response:
+        # Covers terraform-scanner's ScannerError -- a tool that crashed or
+        # timed out rather than one that scanned clean. Raising leaves the
+        # finding at status "mapped" so a re-run retries it, which is the right
+        # outcome: nothing was learned about this fix either way.
         raise RuntimeError(f"terraform-scanner self-check invocation failed: {result}")
-    return result["findings"]
+    # scan_errors is absent from responses produced before the scanner reported
+    # it; treated as "none known" rather than defaulting the check to failed.
+    return result["findings"], result.get("scan_errors") or []
 
 
 def _evaluate_self_check(finding, rescan_findings, baseline_counts):
@@ -438,7 +468,7 @@ def _evaluate_self_check(finding, rescan_findings, baseline_counts):
 
 def _write_result(
     finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
-    suppression_attempt=None, dropped_resources=None, assumptions=None,
+    suppression_attempt=None, dropped_resources=None, assumptions=None, scan_errors=None,
 ):
     table = dynamodb.Table(DYNAMODB_TABLE)
     table.update_item(
@@ -461,6 +491,11 @@ def _write_result(
                 # matter how clean the rescan came back.
                 "dropped_resources": dropped_resources or [],
                 "assumptions": assumptions or [],
+                # Files the scanner couldn't parse. Non-empty means the fix was
+                # never actually verified -- distinct from a fix that was
+                # verified and failed, which is what a reviewer would otherwise
+                # assume from self_check_passed=False.
+                "scan_errors": scan_errors or [],
             },
             ":status": "fix-proposed" if self_check_passed else "needs-human-only",
             ":now": datetime.now(timezone.utc).isoformat(),

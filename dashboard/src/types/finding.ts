@@ -46,6 +46,12 @@ export interface ProposedFix {
   /** Facts the fix depends on that the agent could not verify from the single
    *  file it was shown. Non-empty forces human review. */
   assumptions?: string[]
+  /** Files the scanner could not parse when rescanning the fix. Non-empty means
+   *  the fix was never actually verified -- an unparseable file produces no
+   *  findings, which the self-check would otherwise read as the finding having
+   *  been cleared. Distinct from a fix that was verified and failed, and the
+   *  reviewer has to be told which one this is. */
+  scan_errors?: string[]
 }
 
 export interface Finding {
