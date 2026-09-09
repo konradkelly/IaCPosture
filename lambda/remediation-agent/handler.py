@@ -108,6 +108,7 @@ def handler(event, context):
 
     fix_proposed_count = 0
     needs_human_count = 0
+    superseded_count = 0
     error_count = 0
 
     for file_path, findings in _group_by_file(mapped_findings):
@@ -127,8 +128,30 @@ def handler(event, context):
         # original counts, so its return would not register as a new finding.
         baseline_counts = _query_baseline_counts(pr_id, file_path)
         applies_after = []
+        # (source, rule_id) -> the fix that took it to zero in this run. Rules
+        # overlap between and within the two scanners, so one fix routinely
+        # clears more than its own finding: on demo-1, CKV_AWS_145 wants KMS
+        # and aws-s3-enable-bucket-encryption wants any encryption, so a KMS
+        # fix satisfies both.
+        cleared_by = {}
 
         for finding in findings:
+            # An earlier fix in this file already removed this rule, so there
+            # is nothing left to fix. Remediating anyway is not just wasted:
+            # the model is handed a file where the issue is already gone,
+            # returns it unchanged, and _evaluate_self_check compares a rescan
+            # count of 0 against a baseline of 0 -- `0 < 0` is False, so a
+            # finding that is genuinely resolved would be written up as a fix
+            # that failed to clear it.
+            target = (finding.get("source"), finding.get("rule_id"))
+            if target in cleared_by:
+                logger.info(
+                    "finding %s superseded by %s", finding["finding_id"], cleared_by[target],
+                )
+                _write_superseded(finding, cleared_by[target])
+                superseded_count += 1
+                continue
+
             try:
                 outcome = _remediate_finding(
                     pr_id, finding, base_content, baseline_counts, list(applies_after),
@@ -154,6 +177,13 @@ def handler(event, context):
             # didn't clear, introduced new findings -- is not, and would poison
             # every fix after it in this file.
             if outcome.scanner_verified:
+                # Record what this fix took to zero before the baseline moves,
+                # so a later finding on one of those rules can be told which
+                # fix resolved it rather than just that it is gone.
+                for pair, previous in baseline_counts.items():
+                    if previous > 0 and outcome.rescan_counts[pair] == 0:
+                        cleared_by[pair] = finding["finding_id"]
+
                 base_content = outcome.content
                 baseline_counts = outcome.rescan_counts
                 applies_after.append(finding["finding_id"])
@@ -162,6 +192,7 @@ def handler(event, context):
         "pr_id": pr_id,
         "fix_proposed_count": fix_proposed_count,
         "needs_human_only_count": needs_human_count,
+        "superseded_count": superseded_count,
         "error_count": error_count,
     }
 
@@ -564,6 +595,34 @@ def _evaluate_self_check(finding, rescan_findings, baseline_counts):
     # this distinction and collapsing both into "self-check failed" is
     # actively misleading, not just less informative.
     return self_check_passed, self_check_new_findings, cleared
+
+
+def _write_superseded(finding, superseded_by):
+    """Record that another fix in this file already cleared this finding.
+
+    No proposed_fix is written, because none was drafted -- there was nothing
+    left to draft against. That also makes review-api refuse an approve or
+    edit on this finding (it 409s when proposed_fix is absent), which is the
+    right refusal: the decision to make is on the superseding fix, not here.
+
+    Not "resolved": that status means a human accepted something. This is the
+    scanner reporting the rule no longer fires, and it holds only for as long
+    as the superseding fix does -- if that fix is rejected, this finding comes
+    back. superseded_by is stored so that reversal can find it.
+    """
+    table = dynamodb.Table(DYNAMODB_TABLE)
+    table.update_item(
+        Key={"pk": finding["pk"], "sk": finding["sk"]},
+        UpdateExpression=(
+            "SET #status = :status, superseded_by = :by, updated_at = :now"
+        ),
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":status": "superseded",
+            ":by": superseded_by,
+            ":now": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 def _write_result(

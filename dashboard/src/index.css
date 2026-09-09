@@ -395,6 +395,16 @@ textarea {
   color: var(--warn);
 }
 
+/* Cleared by another fix rather than by one of its own, and only for as long
+   as that fix survives review -- muted like resolved, but distinct from it,
+   because no human has accepted anything here yet. */
+.badge--superseded {
+  background: rgba(148, 163, 184, 0.15);
+  border-color: #94a3b8;
+  color: #94a3b8;
+  font-style: italic;
+}
+
 .badge--resolved {
   background: rgba(148, 163, 184, 0.15);
   border-color: #94a3b8;

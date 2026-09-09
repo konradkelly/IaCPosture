@@ -5,6 +5,11 @@ export type FindingStatus =
   | 'mapped'
   | 'fix-proposed'
   | 'needs-human-only'
+  /** Another fix on the same file already cleared this finding's rule, so no
+   *  fix was drafted for it. Conditional on that fix surviving review: if it
+   *  is rejected, this finding comes back. Not 'resolved', which means a human
+   *  accepted something. */
+  | 'superseded'
   | 'resolved'
 
 export type ReviewAction = 'approved' | 'edited' | 'rejected'
@@ -73,6 +78,8 @@ export interface Finding {
   severity?: string
   control_mappings?: ControlMapping[]
   status: FindingStatus
+  /** Set with status 'superseded': the finding whose fix cleared this one. */
+  superseded_by?: string
   proposed_fix?: ProposedFix | null
   created_at?: string
   updated_at?: string

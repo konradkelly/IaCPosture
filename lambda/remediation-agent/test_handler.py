@@ -605,6 +605,7 @@ def test_handler_marks_fix_proposed_on_clean_self_check(mock_dynamodb, mock_s3, 
         "pr_id": "fixture-s3-enc-before",
         "fix_proposed_count": 1,
         "needs_human_only_count": 0,
+        "superseded_count": 0,
         "error_count": 0,
     }
 
@@ -660,6 +661,7 @@ def test_handler_marks_needs_human_only_when_fix_does_not_clear_finding(
         "pr_id": "fixture-s3-enc-before",
         "fix_proposed_count": 0,
         "needs_human_only_count": 1,
+        "superseded_count": 0,
         "error_count": 0,
     }
 
@@ -723,6 +725,7 @@ def test_handler_isolates_a_failing_finding_and_keeps_going(
         "pr_id": "fixture-s3-enc-before",
         "fix_proposed_count": 1,
         "needs_human_only_count": 0,
+        "superseded_count": 0,
         "error_count": 1,
     }
     # Only the surviving finding got written back -- the failed one is untouched.
@@ -958,6 +961,100 @@ def test_an_unreadable_snapshot_fails_every_finding_on_that_file(
     assert result["needs_human_only_count"] == 0
     mock_table.update_item.assert_not_called()
     mock_get_client.assert_not_called()
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_finding_an_earlier_fix_already_cleared_is_marked_superseded(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """Rules overlap, so one fix routinely clears more than its own finding.
+
+    Chaining the baseline made that case score as a failure: the second
+    finding's rule is already at 0 in the baseline, its rescan is also 0, and
+    cleared is `rescan < baseline` -- `0 < 0` is False. A finding that is
+    genuinely resolved would have been written up as a fix that failed to
+    clear it, which is the opposite of the truth."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+    first_fix = _read_fixture_tf("s3-bucket-encryption", "after")
+    # The first fix clears the logging rule as well as its own.
+    clears_both = {"findings": [f for f in after["findings"] if f["rule_id"] != LOGGING_RULE]}
+
+    pair = _encryption_then_logging()
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response(
+        {"corrected_file_content": first_fix, "rationale": "Added SSE.", "assumptions": []}
+    )
+    mock_lambda_client.invoke.side_effect = [_scan_reply(clears_both)]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["fix_proposed_count"] == 1
+    assert result["superseded_count"] == 1
+    # The regression: this must not be counted as a fix that failed.
+    assert result["needs_human_only_count"] == 0
+
+    # No second model call and no second scan -- there was nothing left to fix.
+    assert mock_get_client.return_value.messages.create.call_count == 1
+    assert mock_lambda_client.invoke.call_count == 1
+
+    superseded = mock_table.update_item.call_args_list[1].kwargs
+    assert superseded["Key"]["sk"] == pair[1]["sk"]
+    values = superseded["ExpressionAttributeValues"]
+    assert values[":status"] == "superseded"
+    assert values[":by"] == pair[0]["finding_id"]
+    # No proposed_fix is written: none was drafted, and its absence is what
+    # makes review-api refuse an approve or edit here.
+    assert ":pf" not in values
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_partially_cleared_rule_does_not_supersede(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """Only a rule taken to zero supersedes. A file can hold several instances
+    of one rule, and clearing one of three leaves the others firing -- that
+    finding still needs its own fix."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+    first_fix = _read_fixture_tf("s3-bucket-encryption", "after")
+    # Logging still fires after the first fix, so nothing is superseded.
+    still_logging = after
+
+    pair = _encryption_then_logging()
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.side_effect = [
+        _fake_anthropic_response({"corrected_file_content": first_fix,
+                                  "rationale": "Added SSE.", "assumptions": []}),
+        _fake_anthropic_response({"corrected_file_content": first_fix + '\nresource "aws_s3_bucket_logging" "l" {}\n',
+                                  "rationale": "Added logging.", "assumptions": []}),
+    ]
+    mock_lambda_client.invoke.side_effect = [
+        _scan_reply(still_logging),
+        _scan_reply({"findings": [f for f in after["findings"] if f["rule_id"] != LOGGING_RULE]}),
+    ]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["superseded_count"] == 0
+    assert result["fix_proposed_count"] == 2
+    assert mock_get_client.return_value.messages.create.call_count == 2
 
 
 # ---------- pagination ----------

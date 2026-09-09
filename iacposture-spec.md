@@ -167,6 +167,15 @@ there. This was observed in practice, with one approval on `demo-1` showing up
 against `manual-test-1`. For a log whose entire purpose is that nothing is
 silently decided, misattribution is the one defect it cannot tolerate.
 
+**On `superseded`:** set when another fix on the same file already cleared this
+finding's rule, so no fix was drafted for it — with `superseded_by` naming the
+finding whose fix did it. Rules overlap between and within the two scanners
+(`CKV_AWS_145` wants KMS, `aws-s3-enable-bucket-encryption` wants any
+encryption), so one fix routinely clears more than its own finding. Distinct
+from `resolved`, which means a human accepted something; this is the scanner
+reporting the rule no longer fires, and it holds only while the superseding fix
+does.
+
 **On `applies_after`:** the ordered finding ids whose fixes this one is
 drafted on top of, empty for the first fix in a file. Fixes to one file are a
 chain, not a set — every file in the live table carries 3-22 findings, and
