@@ -40,6 +40,15 @@ Matches the convention used by the other two Lambdas:
    on. A fix the scanner rejected does not advance the chain; a fix held for
    human review (deleted resource, declared assumption) does, because the
    rescan still proved it a sound edit.
+   Before drafting, check whether an earlier fix in this file already took the
+   finding's `(source, rule_id)` to zero. If so, write `status: "superseded"`
+   with `superseded_by`, and **do not call the model** — there is nothing left
+   to fix. Skipping is not merely an optimisation: the model would be handed a
+   file where the issue is already gone, return it unchanged, and the
+   self-check would compare a rescan count of 0 against a baseline of 0.
+   `0 < 0` is False, so a genuinely resolved finding would be written up as a
+   fix that failed to clear it. Only a rule taken to *zero* supersedes —
+   clearing one of three instances leaves the finding real.
 2. Once per file, fetch the original from
    `s3://<ARTIFACTS_BUCKET>/scans/<pr_id>/<finding.file>`. `finding.file`
    is a path relative to the scan prefix (e.g. `"main.tf"`) — this was

@@ -5,6 +5,7 @@ const LABELS: Record<FindingStatus, string> = {
   mapped: 'Mapped',
   'fix-proposed': 'Fix proposed',
   'needs-human-only': 'Needs human',
+  superseded: 'Superseded',
   resolved: 'Resolved',
 }
 

@@ -133,6 +133,28 @@ export function FindingDetailPage() {
         <ControlMapping mappings={finding.control_mappings} />
       </section>
 
+      {finding.status === 'superseded' && (
+        <section className="panel">
+          <h2>Superseded</h2>
+          <p>
+            No fix was drafted for this finding: another fix on the same file already cleared the
+            rule it fires on, and the scanner confirmed it no longer reports.
+          </p>
+          {finding.superseded_by && (
+            <p>
+              Cleared by{' '}
+              <Link
+                to={`/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(finding.superseded_by)}`}
+              >
+                {finding.superseded_by}
+              </Link>
+              . That fix is still a proposal — if it is rejected, this finding comes back and will
+              be remediated on its own.
+            </p>
+          )}
+        </section>
+      )}
+
       {finding.proposed_fix?.rationale && (
         <section className="panel">
           <h2>Remediation rationale</h2>
