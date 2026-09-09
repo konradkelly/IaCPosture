@@ -205,6 +205,32 @@ def test_edit_replaces_the_diff_preserves_the_agents_and_voids_the_self_check(mo
     assert event_item["edited_diff"] == "--- a/main.tf\n+reviewer edit\n"
 
 
+def test_an_edit_preserves_what_the_fix_is_drafted_on(mock_table):
+    """applies_after is deliberately not in the reset list alongside the
+    self-check fields. Those are claims about whether this diff was verified,
+    which a hand-edit invalidates. applies_after is a fact about what the diff
+    is rooted on, and editing the diff does not re-root it -- the reviewer's
+    version still only applies once its prerequisites do."""
+    chained = {
+        **FINDING,
+        "proposed_fix": {**FINDING["proposed_fix"], "applies_after": ["earlier1", "earlier2"]},
+    }
+    mock_table.get_item.return_value = {"Item": chained}
+
+    handler.handler(
+        _event(
+            "POST /prs/{pr_id}/findings/{finding_id}/review",
+            {"pr_id": "manual-1", "finding_id": "abc123"},
+            {"action": "edited", "edited_diff": "reviewer version"},
+        ),
+        None,
+    )
+
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":pf"]
+    assert written["applies_after"] == ["earlier1", "earlier2"]
+    assert written["self_check_passed"] is False
+
+
 def test_editing_an_unparseable_fix_clears_the_agents_parse_failure(mock_table):
     """The likeliest response to "the fix did not parse" is a reviewer fixing
     the syntax by hand. Carrying the agent's parse failure onto that edit would

@@ -160,6 +160,31 @@ export function FindingDetailPage() {
               </div>
             )}
 
+          {finding.proposed_fix.applies_after &&
+            finding.proposed_fix.applies_after.length > 0 && (
+              <div className="alert alert--warn">
+                <p>
+                  <strong>
+                    This fix is drafted on top of{' '}
+                    {finding.proposed_fix.applies_after.length} earlier fix
+                    {finding.proposed_fix.applies_after.length === 1 ? '' : 'es'} to the same file.
+                  </strong>{' '}
+                  The diff below assumes those are already applied — on their own they do not
+                  apply cleanly, and approving this one without them lands a change whose context
+                  never existed. Review them first:
+                </p>
+                <ul>
+                  {finding.proposed_fix.applies_after.map((id) => (
+                    <li key={id}>
+                      <Link to={`/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(id)}`}>
+                        {id}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
           {finding.proposed_fix.scan_errors &&
             finding.proposed_fix.scan_errors.length > 0 && (
               <div className="alert alert--error">

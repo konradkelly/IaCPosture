@@ -27,8 +27,20 @@ Matches the convention used by the other two Lambdas:
 
 ## Processing steps
 
-1. Query DynamoDB for findings under `pk = PR#<pr_id>`, `status = "mapped"`.
-2. For each finding, fetch the original file from
+1. Query DynamoDB for findings under `pk = PR#<pr_id>`, `status = "mapped"`,
+   then **group them by `file` and process each file as a chain**, in a
+   deterministic order (position in the file, then identity). Every file in
+   the live table carries between 3 and 22 findings, so drafting each fix
+   from the pristine snapshot produces that many competing whole-file
+   rewrites of the same few lines — on `demo-1`, two of them created the same
+   resource address with different arguments, which is Terraform that will
+   not validate rather than a merge conflict. Each fix is drafted against the
+   file as the previous **scanner-verified** fix in that file left it, and
+   `proposed_fix.applies_after` records the ordered finding ids it is built
+   on. A fix the scanner rejected does not advance the chain; a fix held for
+   human review (deleted resource, declared assumption) does, because the
+   rescan still proved it a sound edit.
+2. Once per file, fetch the original from
    `s3://<ARTIFACTS_BUCKET>/scans/<pr_id>/<finding.file>`. `finding.file`
    is a path relative to the scan prefix (e.g. `"main.tf"`) — this was
    recently fixed on the deployed scanner (it used to be a broken
@@ -41,7 +53,9 @@ Matches the convention used by the other two Lambdas:
    `mapping-agent/handler.py` for the exact pattern: Secrets Manager
    fetch-and-cache, `output_config.format` usage).
 4. Compute the unified diff yourself in code, via Python's
-   `difflib.unified_diff`, between the original and corrected content.
+   `difflib.unified_diff`, between the **base** content this fix was drafted
+   against (not the pristine snapshot, unless this is the file's first fix)
+   and the corrected content.
    Don't ask the LLM to author the diff directly — a hand-authored diff
    risks not applying cleanly (wrong line numbers/context); a
    mechanically computed one always will.
@@ -74,9 +88,12 @@ Matches the convention used by the other two Lambdas:
    - **Cleared**: no finding in the re-scan matches the original finding's
      `(source, rule_id)`.
    - **No new findings**: every `(source, rule_id)` in the re-scan was
-     already present in the baseline scan of this PR/file (query DynamoDB
-     for the PR's other findings on the same file to build that baseline
-     — don't just check against zero).
+     already present in the baseline for this fix. The baseline is the
+     DynamoDB finding set for the file only for the file's *first* fix;
+     after that it is the previous accepted fix's own rescan. Comparing a
+     later fix against the original counts would let it silently undo an
+     earlier one — a rule the earlier fix cleared is still present in the
+     original baseline, so its return would not register as new.
    - `self_check_passed = cleared AND no_new_findings`.
 8. Write the result back:
    ```python
@@ -91,6 +108,7 @@ Matches the convention used by the other two Lambdas:
                "self_check_passed": self_check_passed,
                "self_check_new_findings": self_check_new_findings,
                "scan_errors": scan_errors,
+               "applies_after": applies_after,
            },
            ":status": "fix-proposed" if self_check_passed else "needs-human-only",
            ":now": now_iso,

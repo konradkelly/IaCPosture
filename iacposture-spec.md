@@ -145,7 +145,7 @@ FindingRecord (DynamoDB)
 ├── severity
 ├── control_mappings: [{ framework: "CIS-AWS" | "CIS-Kubernetes" | "OWASP-CICD" | "OWASP-CloudNative", control_id, control_text_ref (S3 key), citation_span }]
 ├── status: raw | mapped | fix-proposed | needs-human-only | resolved
-├── proposed_fix: { diff, rationale, self_check_passed, cleared, self_check_new_findings: [], agent_diff? }
+├── proposed_fix: { diff, rationale, self_check_passed, cleared, self_check_new_findings: [], agent_diff?, applies_after: [], scan_errors: [] }
 └── created_at, updated_at
 
 ReviewEvent (DynamoDB)
@@ -166,6 +166,19 @@ every other PR containing that finding, attributing decisions nobody made
 there. This was observed in practice, with one approval on `demo-1` showing up
 against `manual-test-1`. For a log whose entire purpose is that nothing is
 silently decided, misattribution is the one defect it cannot tolerate.
+
+**On `applies_after`:** the ordered finding ids whose fixes this one is
+drafted on top of, empty for the first fix in a file. Fixes to one file are a
+chain, not a set — every file in the live table carries 3-22 findings, and
+drafting each from the pristine snapshot produced that many competing rewrites
+of the same lines. A diff does not apply cleanly without its prerequisites, so
+approving one without them lands a change whose context never existed. Survives
+a reviewer's edit, unlike the self-check fields: editing a diff does not
+re-root it.
+
+**On `scan_errors`:** files the scanner could not parse when rescanning this
+fix. Non-empty means the fix was never verified at all, which is distinct from
+a fix that was verified and failed.
 
 **On `proposed_fix`:** `cleared` records whether the rescan confirmed the
 original finding gone, separately from `self_check_passed`, which also

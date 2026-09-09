@@ -46,6 +46,13 @@ export interface ProposedFix {
   /** Facts the fix depends on that the agent could not verify from the single
    *  file it was shown. Non-empty forces human review. */
   assumptions?: string[]
+  /** The fixes, in order, this one is drafted on top of -- empty means it
+   *  applies to the pristine file. Every file in this project carries several
+   *  findings, so most fixes are not independent: this diff will not apply
+   *  cleanly unless these have been applied first. Preserved across a
+   *  reviewer's edit, unlike the self-check fields, because editing a diff
+   *  does not change what it is rooted on. */
+  applies_after?: string[]
   /** Files the scanner could not parse when rescanning the fix. Non-empty means
    *  the fix was never actually verified -- an unparseable file produces no
    *  findings, which the self-check would otherwise read as the finding having
