@@ -205,6 +205,40 @@ def test_edit_replaces_the_diff_preserves_the_agents_and_voids_the_self_check(mo
     assert event_item["edited_diff"] == "--- a/main.tf\n+reviewer edit\n"
 
 
+def test_editing_an_unparseable_fix_clears_the_agents_parse_failure(mock_table):
+    """The likeliest response to "the fix did not parse" is a reviewer fixing
+    the syntax by hand. Carrying the agent's parse failure onto that edit would
+    keep flagging a file that no longer exists as broken -- and scan_errors
+    outranks every other badge, so it would mask the edit's real state."""
+    unparseable = {
+        **FINDING,
+        "status": "needs-human-only",
+        "proposed_fix": {
+            **FINDING["proposed_fix"],
+            "self_check_passed": False,
+            "cleared": False,
+            "scan_errors": ["main.tf"],
+        },
+    }
+    mock_table.get_item.return_value = {"Item": unparseable}
+
+    response = handler.handler(
+        _event(
+            "POST /prs/{pr_id}/findings/{finding_id}/review",
+            {"pr_id": "manual-1", "finding_id": "abc123"},
+            {"action": "edited", "edited_diff": "--- a/main.tf\n+  }\n"},
+        ),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":pf"]
+    assert written["scan_errors"] == []
+    # Still unverified, just for the ordinary reason now: no scan has run
+    # against the reviewer's diff either.
+    assert written["self_check_passed"] is False
+
+
 def test_second_edit_does_not_overwrite_the_agents_original_diff(mock_table):
     already_edited = {
         **FINDING,

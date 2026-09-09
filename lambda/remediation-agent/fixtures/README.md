@@ -34,6 +34,22 @@ case where self-check should *fail* (new finding introduced, or the
 original issue not actually cleared), you'll need to add one — these two
 only cover the success path.
 
+## The unparseable case lives elsewhere
+
+There is deliberately no `before/after` pair here for "the agent returned a
+file that doesn't parse". The broken file is
+[`lambda/terraform-scanner/fixtures/unparseable/main.tf`](../../terraform-scanner/fixtures/unparseable/main.tf),
+and `test_handler.py` reads it from there rather than keeping a copy.
+
+Two reasons. It's the scanner's input as much as the agent's output, so a
+copy on each side would drift the moment either was edited. And a captured
+`scan-response.json` would add nothing: what the scanner reports for that
+file is an empty `findings` list plus a `scan_errors` entry, and it's the
+`scan_errors` entry — not any finding — that the gate keys on. The tests mock
+that response directly. Everything the ground-truth rule above protects (real
+rule_ids, real line ranges, real severities) is absent from this case by
+construction.
+
 ## Using these
 
 Mock your Lambda's invocation of `terraform-scanner` so that, given the

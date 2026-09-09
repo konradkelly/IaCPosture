@@ -309,8 +309,12 @@ def test_adding_a_resource_is_not_a_deletion():
     assert handler._find_dropped_resources(SG_ORIGINAL, corrected) == []
 
 
-def _run_one_finding(mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client, payload):
-    """Drives handler() over a single mapped finding with a canned model reply."""
+def _run_one_finding(mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client, payload,
+                     scan_response=None):
+    """Drives handler() over a single mapped finding with a canned model reply.
+
+    scan_response overrides what the mocked terraform-scanner returns for the
+    self-check; it defaults to the fixture's captured clean-fix rescan."""
     before = _load_fixture("s3-bucket-encryption", "before")
     after = _load_fixture("s3-bucket-encryption", "after")
     finding = {**next(f for f in before["findings"]
@@ -327,8 +331,9 @@ def _run_one_finding(mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
         "Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())
     }
     mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response(payload)
+    rescan = after if scan_response is None else scan_response
     mock_lambda_client.invoke.return_value = {
-        "Payload": SimpleNamespace(read=lambda: json.dumps(after).encode())
+        "Payload": SimpleNamespace(read=lambda: json.dumps(rescan).encode())
     }
 
     result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
@@ -387,6 +392,159 @@ def test_no_assumptions_and_no_deletions_still_passes(
     assert written[":pf"]["self_check_passed"] is True
     assert written[":pf"]["dropped_resources"] == []
     assert written[":pf"]["assumptions"] == []
+
+
+# ---------- unparseable-fix gate ----------
+
+# The scanner's fixture, not a copy: this is the same artifact on both sides of
+# the boundary -- terraform-scanner's input and remediation-agent's output --
+# and a duplicate would drift the moment either side edited its own.
+UNPARSEABLE_TF = (
+    Path(__file__).parents[1] / "terraform-scanner" / "fixtures" / "unparseable" / "main.tf"
+).read_text()
+
+
+def test_an_empty_rescan_reads_as_a_cleared_finding():
+    """Why the gate has to exist, pinned as a test rather than left in a
+    comment. _evaluate_self_check cannot tell "the fix worked" from "the
+    scanner returned nothing", and it is right not to try -- scoring the
+    rescan is its job, deciding whether a rescan happened is not. Delete the
+    gate and this is the behaviour that takes over."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    finding = next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption")
+
+    passed, new_findings, cleared = handler._evaluate_self_check(finding, [], _pairs(before))
+
+    assert passed is True
+    assert cleared is True
+    assert new_findings == []
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_an_unparseable_fix_is_never_scored_as_a_pass(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The false pass, end to end. The model returns a file whose brace it
+    dropped; the scanner parses nothing, so it reports nothing. Without the
+    gate the test above shows exactly what happens next: fix-proposed, with a
+    self-check badge on a file that is not valid Terraform."""
+    result, mock_table = _run_one_finding(
+        mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client,
+        {
+            "corrected_file_content": UNPARSEABLE_TF,
+            "rationale": "Narrowed the SSH ingress CIDR to the VPC range.",
+            "assumptions": [],
+        },
+        scan_response={"findings": [], "scan_errors": ["main.tf"]},
+    )
+
+    assert result["fix_proposed_count"] == 0
+    assert result["needs_human_only_count"] == 1
+
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":status"] == "needs-human-only"
+    assert written[":pf"]["self_check_passed"] is False
+    assert written[":pf"]["scan_errors"] == ["main.tf"]
+    # Not "the fix missed the finding" -- nothing was checked at all, and the
+    # reviewer needs those told apart.
+    assert written[":pf"]["cleared"] is False
+    # The diff is still written: a reviewer fixing the brace by hand wants to
+    # see what the agent was attempting.
+    assert written[":pf"]["diff"]
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_scan_error_naming_another_path_still_blocks_the_verdict(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The self-check scratch prefix holds exactly one file, so any parse error
+    the rescan reports is about the fix under test whatever path it names."""
+    result, _ = _run_one_finding(
+        mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client,
+        {
+            "corrected_file_content": UNPARSEABLE_TF,
+            "rationale": "Narrowed the SSH ingress CIDR.",
+            "assumptions": [],
+        },
+        scan_response={"findings": [], "scan_errors": ["modules/sg/main.tf"]},
+    )
+
+    assert result["fix_proposed_count"] == 0
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_scanner_crash_leaves_the_finding_for_a_retry(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """terraform-scanner raising ScannerError surfaces as a FunctionError on
+    the invoke. Nothing was learned about this fix, so the finding must not be
+    written at all -- it stays "mapped" and a re-run picks it up again."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    finding = {**next(f for f in before["findings"]
+                      if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
+               "status": "mapped"}
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": [finding]}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {
+        "Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())
+    }
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
+        "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+        "rationale": "Added a default SSE configuration.",
+        "assumptions": [],
+    })
+    mock_lambda_client.invoke.return_value = {
+        "FunctionError": "Unhandled",
+        "Payload": SimpleNamespace(read=lambda: json.dumps(
+            {"errorType": "ScannerError", "errorMessage": "tfsec produced no output (exit 126)"}
+        ).encode()),
+    }
+
+    result = handler.handler({"pr_id": "fixture-s3-enc-before"}, None)
+
+    assert result["error_count"] == 1
+    assert result["fix_proposed_count"] == 0
+    assert result["needs_human_only_count"] == 0
+    mock_table.update_item.assert_not_called()
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_response_without_scan_errors_is_not_treated_as_a_failure(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """Backwards compatibility with scanner responses predating the field --
+    absent means "none reported", not "unknown, fail closed". Failing closed
+    here would reject every fix until the scanner Lambda was redeployed."""
+    after = _load_fixture("s3-bucket-encryption", "after")
+    assert "scan_errors" not in after
+
+    result, mock_table = _run_one_finding(
+        mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client,
+        {
+            "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+            "rationale": "Added a default SSE configuration.",
+            "assumptions": [],
+        },
+        scan_response=after,
+    )
+
+    assert result["fix_proposed_count"] == 1
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":pf"]["scan_errors"] == []
 
 
 # ---------- _compute_diff ----------

@@ -60,6 +60,16 @@ Matches the convention used by the other two Lambdas:
    `persist: false` means this re-scan's findings come back to you in the
    response but are never written to DynamoDB — this mode already exists
    on the deployed function.
+   The response also carries `scan_errors` — files the scanner could not
+   parse. **Check it before step 7 and stop if it is non-empty**: an
+   unparseable file yields no findings, and step 7 reads "no findings" as
+   the finding having been cleared, so a fix that drops a brace would come
+   back `self_check_passed: true`. Write `needs-human-only` with
+   `scan_errors` recorded on the fix, and don't compute a verdict — nothing
+   was verified either way. Likewise, if the invocation itself returns a
+   `FunctionError` (the scanner raises `ScannerError` when a tool produces
+   no output at all), leave the finding at `mapped` so a re-run retries it,
+   rather than scoring the fix on a scan that never ran.
 7. Compute `self_check_passed` in code:
    - **Cleared**: no finding in the re-scan matches the original finding's
      `(source, rule_id)`.
@@ -80,6 +90,7 @@ Matches the convention used by the other two Lambdas:
                "rationale": rationale,
                "self_check_passed": self_check_passed,
                "self_check_new_findings": self_check_new_findings,
+               "scan_errors": scan_errors,
            },
            ":status": "fix-proposed" if self_check_passed else "needs-human-only",
            ":now": now_iso,

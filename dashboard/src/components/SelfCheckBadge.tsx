@@ -13,6 +13,18 @@ export function SelfCheckBadge({ proposedFix }: SelfCheckBadgeProps) {
     return <span className="badge badge--pass">Self-check passed</span>
   }
 
+  // A parse failure has to be read before cleared/newCount, not alongside them:
+  // it sets cleared=false with no new findings, which is the same shape as a
+  // fix that was scanned and missed its finding. Falling through would explain
+  // an unverified fix as a failed one.
+  if (proposedFix.scan_errors?.length) {
+    return (
+      <span className="badge badge--fail" title="The scanner could not parse the fix, so nothing was verified">
+        Fix did not parse
+      </span>
+    )
+  }
+
   const newCount = proposedFix.self_check_new_findings?.length ?? 0
   const reasons: string[] = []
 

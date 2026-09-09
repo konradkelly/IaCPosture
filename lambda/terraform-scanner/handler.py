@@ -16,6 +16,14 @@ Event shape:
 Each returned finding's "file" is relative to s3_prefix (e.g. "main.tf"), not
 a local /tmp path -- callers can reconstruct the object's S3 key as
 f"{s3_prefix}{finding['file']}".
+
+Returns {pr_id, finding_count, findings, scan_errors}. "scan_errors" lists
+files the scanner could not parse. It is not cosmetic: a file that fails to
+parse produces no findings, and remediation-agent's self-check reads "no
+findings" as proof that a fix cleared its finding. A caller that ignores
+scan_errors will read an unparseable file as a clean one. A tool that fails
+outright (no output, unparseable output) raises ScannerError instead -- that
+is a scan that did not happen, not a scan with a result.
 """
 
 import hashlib
@@ -48,6 +56,19 @@ s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 
 
+class ScannerError(RuntimeError):
+    """A scanner did not run to completion.
+
+    Deliberately distinct from "the scanner ran and found nothing". Both used
+    to arrive here as an empty list, and the difference matters more than
+    anywhere else in this project: remediation-agent proves a fix by rescanning
+    it and checking the finding no longer fires. A crashed, timed-out, or
+    OOM-killed scanner reports zero findings, which that check reads as "the
+    finding is gone" -- so swallowing a tool failure hands out a
+    scanner-verified badge for a scan that never ran.
+    """
+
+
 def handler(event, context):
     pr_id = event["pr_id"]
     s3_prefix = event["s3_prefix"].rstrip("/") + "/"
@@ -70,10 +91,24 @@ def handler(event, context):
 
         findings = _normalize_tfsec(tfsec_results, pr_id, work_dir) + _normalize_checkov(checkov_report, pr_id)
 
+        scan_errors = _checkov_parse_errors(checkov_report, work_dir)
+        if scan_errors:
+            # Reported, not raised: the other files in the snapshot scanned
+            # fine and their findings are real. Raising would throw those away
+            # over one bad file. It is the caller's job to decide what an
+            # unscannable file means -- for remediation-agent's self-check it
+            # is fatal, for a baseline scan it is a warning.
+            logger.warning("checkov could not parse %d file(s): %s", len(scan_errors), scan_errors)
+
         if persist:
             _write_findings(findings)
 
-        return {"pr_id": pr_id, "finding_count": len(findings), "findings": findings}
+        return {
+            "pr_id": pr_id,
+            "finding_count": len(findings),
+            "findings": findings,
+            "scan_errors": scan_errors,
+        }
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -102,10 +137,19 @@ def _run_tfsec(work_dir):
         timeout=SCAN_TIMEOUT_SECONDS,
     )
     # tfsec exits non-zero when it finds issues -- that's expected, not a failure.
+    # Empty stdout is not: with --format json tfsec always emits an object, even
+    # for a clean scan (as {"results": null}), so nothing at all means the binary
+    # itself failed.
     if not proc.stdout.strip():
-        logger.error("tfsec produced no output: %s", proc.stderr)
-        return []
-    return json.loads(proc.stdout).get("results") or []
+        raise ScannerError(
+            f"tfsec produced no output (exit {proc.returncode}): {proc.stderr.strip()[:500]}"
+        )
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"tfsec produced unparseable output: {proc.stdout[:500]}") from exc
+    # "results": null is tfsec's clean scan, distinct from the failures above.
+    return parsed.get("results") or []
 
 
 def _run_checkov(work_dir):
@@ -125,12 +169,22 @@ def _run_checkov(work_dir):
     )
     # checkov exits non-zero when it finds failed checks -- that's expected, not a failure.
     if not proc.stdout.strip():
-        logger.error("checkov produced no output: %s", proc.stderr)
-        return {}
-    return json.loads(proc.stdout)
+        raise ScannerError(
+            f"checkov produced no output (exit {proc.returncode}): {proc.stderr.strip()[:500]}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"checkov produced unparseable output: {proc.stdout[:500]}") from exc
 
 
-def _relativize_tfsec_path(file_path, work_dir):
+def _relativize_path(file_path, work_dir):
+    """Strip the scratch directory back off a path a tool reported.
+
+    Handles both forms the tools emit: tfsec echoes the absolute path it was
+    invoked with (work_dir/main.tf), and checkov's parsing_errors carry the
+    same, while its check records are already root-relative (/main.tf).
+    """
     prefix = work_dir.rstrip("/") + "/"
     if file_path.startswith(prefix):
         return file_path[len(prefix):]
@@ -147,12 +201,33 @@ def _normalize_tfsec(results, pr_id, work_dir):
             source="tfsec",
             rule_id=r.get("long_id") or r.get("rule_id", "unknown"),
             # tfsec reports the full local path it was invoked with (work_dir/main.tf).
-            file_path=_relativize_tfsec_path(location.get("filename", ""), work_dir),
+            file_path=_relativize_path(location.get("filename", ""), work_dir),
             line_range=[location.get("start_line"), location.get("end_line")],
             severity=(r.get("severity") or "UNKNOWN").upper(),
             now=now,
         ))
     return findings
+
+
+def _checkov_parse_errors(report, work_dir):
+    """Files checkov could not parse, relative to work_dir.
+
+    checkov is the parse oracle here because it is the only one of the two
+    tools that reports the failure as data: tfsec writes parse trouble to
+    stderr and still emits a well-formed (empty) result set, which is
+    indistinguishable from a clean scan at this layer.
+
+    A file that fails to parse contributes no findings, so without this a
+    syntactically broken .tf scans exactly like a compliant one -- and
+    remediation-agent's self-check would read that as proof its fix worked.
+
+    Absent "results" is checkov's shape for a report with nothing in it at all
+    (see Report.get_dict / is_empty upstream); parsing errors would themselves
+    make the report non-empty, so that shape means zero parse errors, not
+    unknown.
+    """
+    parse_errors = ((report.get("results") or {}).get("parsing_errors")) or []
+    return sorted({_relativize_path(path, work_dir) for path in parse_errors})
 
 
 def _normalize_checkov(report, pr_id):
