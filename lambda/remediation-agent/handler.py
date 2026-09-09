@@ -15,6 +15,14 @@ cleared. So a failed invocation is raised (the finding stays "mapped" for a
 retry) and a reported parse error short-circuits to needs-human-only before
 any verdict is computed.
 
+Findings are remediated one file at a time, in a stable order, each fix
+drafted against the file as the previous accepted fix left it. Every file in
+the live table carries between 3 and 22 findings, so drafting each fix from
+the pristine snapshot produced N competing whole-file rewrites of the same
+few lines -- two of which, on demo-1, created the same resource address with
+different arguments. proposed_fix.applies_after records the chain a fix was
+built on.
+
 Event shape:
 { "pr_id": "manual-test-1" }
 """
@@ -25,6 +33,7 @@ import json
 import logging
 import os
 import re
+import typing
 from datetime import datetime, timezone
 
 import anthropic
@@ -48,6 +57,22 @@ lambda_client = boto3.client("lambda")
 # environment, so fetch it at most once per container (same pattern as
 # mapping-agent).
 _anthropic_client = None
+
+class _Outcome(typing.NamedTuple):
+    """What one finding's remediation produced.
+
+    final_passed is the verdict written to the record; scanner_verified is
+    the narrower question of whether the rescan proved this fix cleared its
+    finding without introducing new ones. They differ whenever a
+    human-review gate (a deleted resource, a declared assumption) overrides
+    a clean rescan, and only the second one decides whether this fix becomes
+    the base for the next finding in the file -- see handler().
+    """
+    final_passed: bool
+    scanner_verified: bool
+    content: str | None
+    rescan_counts: "collections.Counter | None"
+
 
 REMEDIATION_OUTPUT_SCHEMA = {
     "type": "object",
@@ -85,20 +110,53 @@ def handler(event, context):
     needs_human_count = 0
     error_count = 0
 
-    for finding in mapped_findings:
+    for file_path, findings in _group_by_file(mapped_findings):
         try:
-            self_check_passed = _remediate_finding(pr_id, finding)
+            base_content = _fetch_original_content(pr_id, file_path)
         except Exception:
-            # One finding's failure shouldn't abandon the rest of the batch.
-            # Status stays "mapped", so a re-run retries this finding.
-            logger.exception("remediation failed for finding %s", finding.get("finding_id"))
-            error_count += 1
+            # Nothing in this file can be remediated without its content, and
+            # the failure is the file's, not any one finding's.
+            logger.exception("could not read the snapshot for %s", file_path)
+            error_count += len(findings)
             continue
 
-        if self_check_passed:
-            fix_proposed_count += 1
-        else:
-            needs_human_count += 1
+        # The finding set of base_content, which starts as the pristine file
+        # and is replaced below by each accepted fix's own rescan. Comparing a
+        # later fix against the *original* baseline would let it silently undo
+        # an earlier one: a rule an earlier fix cleared is still present in the
+        # original counts, so its return would not register as a new finding.
+        baseline_counts = _query_baseline_counts(pr_id, file_path)
+        applies_after = []
+
+        for finding in findings:
+            try:
+                outcome = _remediate_finding(
+                    pr_id, finding, base_content, baseline_counts, list(applies_after),
+                )
+            except Exception:
+                # One finding's failure shouldn't abandon the rest of the file.
+                # Status stays "mapped", so a re-run retries this finding. The
+                # chain is not advanced, so the next finding is drafted against
+                # the same base as this one was.
+                logger.exception("remediation failed for finding %s", finding.get("finding_id"))
+                error_count += 1
+                continue
+
+            if outcome.final_passed:
+                fix_proposed_count += 1
+            else:
+                needs_human_count += 1
+
+            # scanner_verified, not final_passed: a fix held for human review
+            # because it deletes a resource or rests on an assumption is still
+            # a coherent edit that cleared its finding, and the next fix should
+            # build on it. A fix the scanner rejected -- suppression, unparseable,
+            # didn't clear, introduced new findings -- is not, and would poison
+            # every fix after it in this file.
+            if outcome.scanner_verified:
+                base_content = outcome.content
+                baseline_counts = outcome.rescan_counts
+                applies_after.append(finding["finding_id"])
 
     return {
         "pr_id": pr_id,
@@ -108,17 +166,47 @@ def handler(event, context):
     }
 
 
-def _remediate_finding(pr_id, finding):
+def _group_by_file(findings):
+    """Findings grouped by file, each group in a stable remediation order.
+
+    The order decides which fix every later fix is drafted against, so it has
+    to be deterministic: a re-run that shuffled it would produce a different
+    chain, and different diffs, from identical inputs. Sorted by position in
+    the file, then by identity to break ties between two rules on one line.
+    """
+    groups = collections.defaultdict(list)
+    for finding in findings:
+        groups[finding["file"]].append(finding)
+    for file_path in sorted(groups):
+        yield file_path, sorted(groups[file_path], key=_remediation_order)
+
+
+def _remediation_order(finding):
+    line_range = finding.get("line_range") or []
+    start = line_range[0] if line_range else None
+    # Both halves of line_range can be null (a rule that names a file rather
+    # than a line), and DynamoDB hands the numbers back as Decimal.
+    return (
+        int(start) if start is not None else 0,
+        finding.get("source", ""),
+        finding.get("rule_id", ""),
+        finding["finding_id"],
+    )
+
+
+def _remediate_finding(pr_id, finding, base_content, baseline_counts, applies_after):
     finding_id = finding["finding_id"]
     file_path = finding["file"]
 
-    original_content = _fetch_original_content(pr_id, file_path)
-    remediation = _call_remediation_agent(finding, original_content)
+    # base_content is the file as the previous accepted fix in this file left
+    # it, not the pristine snapshot, so the model is shown what it is actually
+    # editing and the diff is minimal against that.
+    remediation = _call_remediation_agent(finding, base_content)
     corrected_content = remediation["corrected_file_content"]
     rationale = remediation["rationale"]
     assumptions = remediation.get("assumptions") or []
 
-    diff_text = _compute_diff(original_content, corrected_content, file_path)
+    diff_text = _compute_diff(base_content, corrected_content, file_path)
 
     # Gate before the self-check, not after: a suppression would *pass* the
     # self-check by construction, so there is no point scanning it.
@@ -131,9 +219,9 @@ def _remediate_finding(pr_id, finding):
         _write_result(
             finding, diff_text, rationale,
             self_check_passed=False, self_check_new_findings=[], cleared=False,
-            suppression_attempt=suppressions,
+            suppression_attempt=suppressions, applies_after=applies_after,
         )
-        return False
+        return _Outcome(False, False, None, None)
 
     _upload_scratch_file(pr_id, finding_id, file_path, corrected_content)
     rescan_findings, scan_errors = _invoke_self_check(pr_id, finding_id)
@@ -152,13 +240,19 @@ def _remediate_finding(pr_id, finding):
             finding, diff_text, rationale,
             self_check_passed=False, self_check_new_findings=[], cleared=False,
             assumptions=assumptions, scan_errors=scan_errors,
+            applies_after=applies_after,
         )
-        return False
+        return _Outcome(False, False, None, None)
 
-    baseline_counts = _query_baseline_counts(pr_id, file_path)
     self_check_passed, self_check_new_findings, cleared = _evaluate_self_check(
         finding, rescan_findings, baseline_counts
     )
+    # Kept so an accepted fix can hand its own finding set to the next fix in
+    # this file as that fix's baseline.
+    rescan_counts = collections.Counter(
+        (f["source"], f["rule_id"]) for f in rescan_findings
+    )
+    scanner_verified = self_check_passed
 
     # A clean rescan proves the finding is gone. It says nothing about whether
     # the infrastructure still works, and these two cases are exactly where
@@ -167,7 +261,7 @@ def _remediate_finding(pr_id, finding):
     # Both stay proposals a human has to weigh, so the verdict is overridden
     # even when the scanner is satisfied. Scanned first regardless -- the
     # rescan result is still worth showing the reviewer.
-    dropped_resources = _find_dropped_resources(original_content, corrected_content)
+    dropped_resources = _find_dropped_resources(base_content, corrected_content)
     if dropped_resources or assumptions:
         logger.info(
             "finding %s held for human review (dropped=%s, assumptions=%s)",
@@ -178,8 +272,14 @@ def _remediate_finding(pr_id, finding):
     _write_result(
         finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
         dropped_resources=dropped_resources, assumptions=assumptions,
+        applies_after=applies_after,
     )
-    return self_check_passed
+    return _Outcome(
+        self_check_passed,
+        scanner_verified,
+        corrected_content if scanner_verified else None,
+        rescan_counts if scanner_verified else None,
+    )
 
 
 def _query_all(table, **kwargs):
@@ -469,6 +569,7 @@ def _evaluate_self_check(finding, rescan_findings, baseline_counts):
 def _write_result(
     finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
     suppression_attempt=None, dropped_resources=None, assumptions=None, scan_errors=None,
+    applies_after=None,
 ):
     table = dynamodb.Table(DYNAMODB_TABLE)
     table.update_item(
@@ -491,6 +592,13 @@ def _write_result(
                 # matter how clean the rescan came back.
                 "dropped_resources": dropped_resources or [],
                 "assumptions": assumptions or [],
+                # The fixes, in order, that this one is drafted on top of --
+                # empty means it applies to the pristine file. Every file in
+                # this project carries several findings, so most fixes are not
+                # independent: applying this diff without these first will not
+                # apply cleanly, and approving it without them lands a fix
+                # whose context never existed.
+                "applies_after": applies_after or [],
                 # Files the scanner couldn't parse. Non-empty means the fix was
                 # never actually verified -- distinct from a fix that was
                 # verified and failed, which is what a reviewer would otherwise

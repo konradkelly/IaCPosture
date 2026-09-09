@@ -220,7 +220,10 @@ def test_a_suppressing_fix_is_rejected_before_it_is_ever_scanned(
                "status": "mapped"}
 
     mock_table = MagicMock()
-    mock_table.query.side_effect = [{"Items": [finding]}]
+    mock_table.query.side_effect = [
+        {"Items": [finding]},           # _query_mapped_findings
+        {"Items": before["findings"]},  # _query_baseline_counts, once for the file
+    ]
     mock_dynamodb.Table.return_value = mock_table
 
     original = _read_fixture_tf("s3-bucket-encryption", "before")
@@ -673,32 +676,43 @@ def test_handler_marks_needs_human_only_when_fix_does_not_clear_finding(
 def test_handler_isolates_a_failing_finding_and_keeps_going(
     mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
 ):
-    """One finding blowing up must not abandon the rest of the batch, and the
-    failed finding must keep status "mapped" so a re-run retries it."""
+    """One finding blowing up must not abandon the rest of the file, and the
+    failed finding must keep status "mapped" so a re-run retries it.
+
+    The failure is injected into the model call rather than the snapshot read:
+    the snapshot is now read once per file, so a failure there is the file's
+    and takes every finding on it down (covered separately below)."""
     before = _load_fixture("s3-bucket-encryption", "before")
     after = _load_fixture("s3-bucket-encryption", "after")
-    good = {**next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
-            "status": "mapped"}
-    doomed = {**next(f for f in before["findings"] if f["rule_id"] != "aws-s3-enable-bucket-encryption"),
-              "status": "mapped"}
+    pair = [
+        {**next(f for f in before["findings"] if f["rule_id"] == "aws-s3-enable-bucket-encryption"),
+         "status": "mapped"},
+        {**next(f for f in before["findings"] if f["rule_id"] != "aws-s3-enable-bucket-encryption"),
+         "status": "mapped"},
+    ]
+    # Remediation order is deterministic, so which one gets the failing call is
+    # too -- derived here rather than assumed.
+    first, second = sorted(pair, key=handler._remediation_order)
 
     mock_table = MagicMock()
     mock_table.query.side_effect = [
-        {"Items": [doomed, good]},     # _query_mapped_findings
-        {"Items": before["findings"]}, # _query_baseline_pairs, for `good`
+        {"Items": pair},               # _query_mapped_findings
+        {"Items": before["findings"]}, # _query_baseline_counts, once for the file
     ]
     mock_dynamodb.Table.return_value = mock_table
 
-    # The first finding's S3 fetch fails; the second succeeds.
-    mock_s3.get_object.side_effect = [
-        RuntimeError("NoSuchKey"),
-        {"Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())},
-    ]
+    mock_s3.get_object.return_value = {
+        "Body": SimpleNamespace(read=lambda: _read_fixture_tf("s3-bucket-encryption", "before").encode())
+    }
 
-    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
-        "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
-        "rationale": "Added a default SSE configuration for the bucket.",
-    })
+    mock_get_client.return_value.messages.create.side_effect = [
+        RuntimeError("Anthropic 500"),
+        _fake_anthropic_response({
+            "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+            "rationale": "Added a default SSE configuration for the bucket.",
+            "assumptions": [],
+        }),
+    ]
     mock_lambda_client.invoke.return_value = {
         "Payload": SimpleNamespace(read=lambda: json.dumps(after).encode())
     }
@@ -713,7 +727,237 @@ def test_handler_isolates_a_failing_finding_and_keeps_going(
     }
     # Only the surviving finding got written back -- the failed one is untouched.
     mock_table.update_item.assert_called_once()
-    assert mock_table.update_item.call_args.kwargs["Key"]["sk"] == good["sk"]
+    assert mock_table.update_item.call_args.kwargs["Key"]["sk"] == second["sk"]
+    # The failed finding never joined the chain, so the survivor was still
+    # drafted against the pristine file.
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert written[":pf"]["applies_after"] == []
+    assert first["sk"] != second["sk"]
+
+
+# ---------- per-file chaining ----------
+
+# Marks the fix the s3-bucket-encryption fixture applies. Present in after/,
+# absent from before/ -- which matters because before/ is a literal substring
+# of after/, so "is the base content in this prompt" cannot tell the two apart.
+SSE_MARKER = "aws_s3_bucket_server_side_encryption_configuration"
+
+LOGGING_RULE = "aws-s3-enable-bucket-logging"
+
+SUPPRESSION_LINE = "#tfsec:ignore:aws-s3-enable-bucket-encryption"
+
+
+def _mapped(rule_id, line_start, finding_id, file="main.tf", source="tfsec"):
+    return {
+        "pk": "PR#chain-1", "sk": f"FINDING#{finding_id}", "finding_id": finding_id,
+        "file": file, "source": source, "rule_id": rule_id,
+        "line_range": [line_start, line_start], "severity": "HIGH", "status": "mapped",
+    }
+
+
+def _scan_reply(scan_response):
+    """One mocked terraform-scanner invocation result."""
+    body = json.dumps(scan_response).encode()
+    return {"Payload": SimpleNamespace(read=lambda: body)}
+
+
+def _prompt_of(mock_get_client, call_index):
+    call = mock_get_client.return_value.messages.create.call_args_list[call_index]
+    return call.kwargs["messages"][0]["content"]
+
+
+def _written(mock_table, call_index):
+    return mock_table.update_item.call_args_list[call_index].kwargs["ExpressionAttributeValues"]
+
+
+def _encryption_then_logging():
+    """Two findings on one file, in the order the chain will process them."""
+    return sorted(
+        [_mapped("aws-s3-enable-bucket-encryption", 1, "f1"),
+         _mapped(LOGGING_RULE, 2, "f2")],
+        key=handler._remediation_order,
+    )
+
+
+def test_findings_are_grouped_by_file_and_ordered_by_position():
+    """The order fixes which fix each later fix is drafted on, so identical
+    inputs must always produce the identical chain."""
+    findings = [
+        _mapped("c", 9, "f3"), _mapped("a", 1, "f1", file="b.tf"),
+        _mapped("b", 2, "f2"), _mapped("d", 1, "f4"),
+    ]
+
+    grouped = list(handler._group_by_file(findings))
+
+    assert [f for f, _ in grouped] == ["b.tf", "main.tf"]
+    assert [g["finding_id"] for g in grouped[1][1]] == ["f4", "f2", "f3"]
+
+
+def test_ordering_survives_a_null_line_range():
+    """A rule that names a file rather than a line still has to sort somewhere
+    deterministic instead of raising."""
+    unpositioned = {**_mapped("x", None, "f9"), "line_range": [None, None]}
+
+    assert handler._remediation_order(unpositioned)[0] == 0
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_each_fix_is_drafted_against_the_previous_accepted_fix(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The point of the change. Two findings on one file used to produce two
+    whole-file rewrites of the same lines, both rooted at the pristine
+    snapshot, so approving both was a guaranteed conflict."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+    first_fix = _read_fixture_tf("s3-bucket-encryption", "after")
+    second_fix = first_fix + '\nresource "aws_s3_bucket_logging" "added_second" {}\n'
+    # What the scanner reports once the logging fix lands too.
+    after_both = {"findings": [f for f in after["findings"] if f["rule_id"] != LOGGING_RULE]}
+
+    pair = _encryption_then_logging()
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.side_effect = [
+        _fake_anthropic_response({"corrected_file_content": first_fix,
+                                  "rationale": "Added SSE.", "assumptions": []}),
+        _fake_anthropic_response({"corrected_file_content": second_fix,
+                                  "rationale": "Added logging.", "assumptions": []}),
+    ]
+    mock_lambda_client.invoke.side_effect = [_scan_reply(after), _scan_reply(after_both)]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["fix_proposed_count"] == 2
+
+    # The first call saw the pristine file; the second saw the first fix's
+    # output. Checked by the marker rather than by substring, since before/ is
+    # itself a substring of after/.
+    assert SSE_MARKER not in _prompt_of(mock_get_client, 0)
+    assert SSE_MARKER in _prompt_of(mock_get_client, 1)
+
+    # And the second fix's diff is minimal against that base rather than
+    # re-proposing the first fix's edit alongside its own.
+    second_written = _written(mock_table, 1)
+    assert "aws_s3_bucket_logging" in second_written[":pf"]["diff"]
+    assert SSE_MARKER not in second_written[":pf"]["diff"]
+
+    # The dependency is recorded, so a reviewer is not left to infer it.
+    assert _written(mock_table, 0)[":pf"]["applies_after"] == []
+    assert second_written[":pf"]["applies_after"] == [pair[0]["finding_id"]]
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_rejected_fix_does_not_become_the_base_for_the_next(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """A suppression is refused before it is ever scanned, so it was never
+    shown to be a sound edit. Building on it would carry the suppression into
+    every later diff in the file."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+
+    pair = _encryption_then_logging()
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.side_effect = [
+        _fake_anthropic_response({
+            "corrected_file_content": original + "\n#tfsec:ignore:aws-s3-enable-bucket-encryption\n",
+            "rationale": "Intentional.", "assumptions": []}),
+        _fake_anthropic_response({
+            "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+            "rationale": "Added SSE.", "assumptions": []}),
+    ]
+    # Only the second finding reaches the scanner; the first is refused before it.
+    mock_lambda_client.invoke.side_effect = [_scan_reply(after)]
+
+    handler.handler({"pr_id": "chain-1"}, None)
+
+    # The prompt text itself forbids suppressions by name, so the marker has to
+    # be the specific directive the rejected fix added, not the bare tool name.
+    assert SUPPRESSION_LINE not in _prompt_of(mock_get_client, 1)
+    assert _written(mock_table, 1)[":pf"]["applies_after"] == []
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_fix_held_for_human_review_still_advances_the_chain(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The two verdicts come apart here. A fix carrying an assumption is
+    needs-human-only, but the rescan proved it cleared its finding without
+    introducing new ones, so it is a sound edit to build on. Gating the chain
+    on the written verdict instead would return the rest of the file to
+    colliding rewrites over one declared assumption."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+    first_fix = _read_fixture_tf("s3-bucket-encryption", "after")
+    after_both = {"findings": [f for f in after["findings"] if f["rule_id"] != LOGGING_RULE]}
+
+    pair = _encryption_then_logging()
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": before["findings"]}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.side_effect = [
+        _fake_anthropic_response({
+            "corrected_file_content": first_fix, "rationale": "Added SSE.",
+            "assumptions": ["Assumes no client requires an unencrypted read path."]}),
+        _fake_anthropic_response({
+            "corrected_file_content": first_fix + '\nresource "aws_s3_bucket_logging" "l" {}\n',
+            "rationale": "Added logging.", "assumptions": []}),
+    ]
+    mock_lambda_client.invoke.side_effect = [_scan_reply(after), _scan_reply(after_both)]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["needs_human_only_count"] == 1
+    assert result["fix_proposed_count"] == 1
+    assert SSE_MARKER in _prompt_of(mock_get_client, 1)
+    assert _written(mock_table, 1)[":pf"]["applies_after"] == [pair[0]["finding_id"]]
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_an_unreadable_snapshot_fails_every_finding_on_that_file(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """The snapshot is read once per file now, so its failure belongs to the
+    file rather than to any one finding. All of them stay "mapped"."""
+    pair = [_mapped("a", 1, "f1"), _mapped("b", 2, "f2")]
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [{"Items": pair}, {"Items": []}]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.side_effect = RuntimeError("NoSuchKey")
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["error_count"] == 2
+    assert result["fix_proposed_count"] == 0
+    assert result["needs_human_only_count"] == 0
+    mock_table.update_item.assert_not_called()
+    mock_get_client.assert_not_called()
 
 
 # ---------- pagination ----------
