@@ -2,8 +2,14 @@
 *.tfstate
 *.tfstate.*
 *.tfvars
+# Same values as *.tfvars, JSON form -- Terraform auto-loads terraform.tfvars.json
+# and *.auto.tfvars.json just as it does the HCL files.
+*.tfvars.json
 *.tfplan
 tfplan.out
+# `aws lambda invoke ... out.json` run from this directory while testing a
+# deployed function against terraform output values.
+out.json
 !terraform.tfvars.example
 crash.log
 override.tf
