@@ -144,7 +144,8 @@ FindingRecord (DynamoDB)
 ├── file, line_range
 ├── severity
 ├── control_mappings: [{ framework: "CIS-AWS" | "CIS-Kubernetes" | "OWASP-CICD" | "OWASP-CloudNative", control_id, control_text_ref (S3 key), citation_span }]
-├── status: raw | mapped | fix-proposed | needs-human-only | resolved
+├── status: raw | mapped | fix-proposed | needs-human-only | superseded | resolved
+├── superseded_by: finding_id, only with status superseded
 ├── proposed_fix: { diff, rationale, self_check_passed, cleared, self_check_new_findings: [], agent_diff?, applies_after: [], scan_errors: [] }
 └── created_at, updated_at
 
@@ -279,6 +280,38 @@ The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now a
 | **v4 — Write-back on approval** | Approved fixes committed to PR branch automatically |
 
 **Recommended sequencing given your Feb–June 2027 timeline:** ship v1 first as a complete, demoable artifact — Terraform-only already exercises every DVA-C02-relevant AWS resource in §4.1 except `k8s-scanner` itself. Add v2 (K8s/Helm) once v1's eval numbers (§7) are solid, then invest in v3's GitHub App plumbing last, since it's the most infra-heavy phase for the least new agent-architecture learning.
+
+### 8.1 The admission rule
+
+*Reconstructed from the two places §6 cites it (lines "the two failure modes need telling apart" and "§8.1's admission rule"); the section itself had never been written.*
+
+**A finding enters the pipeline only if a deterministic scanner rule matched. The scanner's rule *is* the vulnerability.** No LLM originates a finding, and no LLM decides that a matched rule is not "really" a problem — that is a human's call, made in the dashboard, recorded in the audit log. This is what keeps detection provable: a finding can always be reproduced by re-running the same tool on the same file, which is not true of anything an LLM asserts.
+
+Two consequences follow.
+
+**The self-check inherits the definition.** "Fixed" means the rule that admitted the finding no longer matches — nothing more. So a fix has exactly two ways to fail the self-check, and they must be reported separately because they call for different responses:
+
+| Failure | Meaning | Reviewer's likely next step |
+|---|---|---|
+| `cleared: false` | The admitting rule still matches | The fix missed; redraft |
+| `cleared: true`, `self_check_new_findings` non-empty | The admitting rule stopped matching, but others started | Usually one edit from passing |
+
+Collapsing both into "self-check failed" would tell a reviewer nothing about which one they are looking at.
+
+**The rule can be made to stop matching without the vulnerability going away.** Every scanner ships an escape hatch — `#tfsec:ignore`, `#checkov:skip`, `trivy:ignore`, `nosec` — and a diff that adds one clears the finding by the definition above while changing no infrastructure. §6 records this happening on the first real run. So the admission rule needs a qualification: it holds for what a rule *matches*, and any scanner class admitted in future must have its suppression syntax added to `SUPPRESSION_MARKERS` before its fixes can be trusted. Likewise a rule stops matching when the file stops parsing, which is what `scan_errors` guards.
+
+### 8.2 `terraform-scanner`: remaining v1 work
+
+What the sections above specify for the scanner versus what exists, as of 2026-09-10, in the order it should be built. The ordering is the argument: the harness is first because nothing after it can be evaluated without it.
+
+| # | Work | Spec | State | Why this position |
+|---|---|---|---|---|
+| 1 | **Eval harness** — labeled `.tf` cases with expected `(source, rule_id)` pairs, one command that scans them and reports detection recall | §7.1 | Not built. One unlabeled fixture; no number of any kind | §8 gates v2 on "eval numbers are solid" and there are none. Also the only honest way to find the §2 coverage gaps rather than assert them. Cheap. |
+| 2 | **Manual trigger** — one command: upload a directory, scan, map, remediate | §8 v1 ("CLI or simple upload") | Not built. Today: `aws s3 cp`, three separate `aws lambda invoke`s, and hand-editing DynamoDB to move statuses | v1 specifies it, and it is what the harness runs on |
+| 3 | **Observability** — `tracing_config` on every Lambda; custom metric findings-per-scan; alarm on scanner errors | §4.1 | Not built. Log groups only | Cheap and DVA-C02 territory. Only became meaningful once `ScannerError` existed: before it, scanner failures were swallowed into empty results and an alarm would never have fired |
+| 4 | **Scan surface** — `.tfvars` and `.tf.json` in the snapshot; `--download-external-modules` so registry/git modules are scanned; a secret scanner | §2 goals: hardcoded secrets, unpinned module sources | The scanner reads `.tf` only, never runs `init`, and runs checkov with `--framework terraform` alone, so the `secrets` framework is off | After 1, so the coverage gain is measured rather than claimed |
+| 5 | **Orchestration** — DynamoDB stream or SQS between scan → map → remediate; Step Functions Map to fan remediation out one finding per invocation | §4.4 step 4; `lambda_remediation_agent.tf`'s own timeout comment | Not built. No stage triggers the next | Bigger, and closer to v3's plumbing than v1's |
+| 6 | **tfsec → Trivy** | §4.3 | tfsec is end-of-life upstream; rules land in Trivy only | Verify upstream status first. Brings K8s/Helm/Dockerfile scanning from one binary, which pre-solves part of v2's layer |
 
 ---
 
