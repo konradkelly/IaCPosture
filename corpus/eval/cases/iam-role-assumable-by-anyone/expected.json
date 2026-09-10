@@ -1,0 +1,11 @@
+{
+  "description": "Role trust policy with Principal \"*\"",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_60"
+    }
+  ],
+  "note": "Expected to MISS. IAMRoleAllowsPublicAssume only inspects Principal.AWS, so the bare Principal = \"*\" form -- fully anonymous, the more dangerous of the two -- is never examined. Kept as a positive so the gap is measured. See the sibling case iam-role-assumable-by-any-aws-principal for the form the rule does catch."
+}

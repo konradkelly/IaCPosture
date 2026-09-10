@@ -1,0 +1,11 @@
+{
+  "description": "Policy granting iam:CreateAccessKey on any user",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_287"
+    }
+  ],
+  "note": "Relabelled after run 1: CKV_AWS_107 is the data-source variant (aws_iam_policy_document); the resource check on aws_iam_policy is CKV_AWS_287."
+}

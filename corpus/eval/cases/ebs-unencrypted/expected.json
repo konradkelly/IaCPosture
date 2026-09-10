@@ -1,0 +1,14 @@
+{
+  "description": "EBS volume with encrypted = false",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_3"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-enable-volume-encryption"
+    }
+  ]
+}

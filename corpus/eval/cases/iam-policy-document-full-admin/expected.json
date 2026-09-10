@@ -1,0 +1,14 @@
+{
+  "description": "aws_iam_policy_document data source allowing \"*\" on \"*\"",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_1"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-iam-no-policy-wildcards"
+    }
+  ]
+}

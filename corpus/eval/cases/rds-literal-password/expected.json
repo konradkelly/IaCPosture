@@ -1,0 +1,11 @@
+{
+  "description": "RDS master password as a string literal in the resource",
+  "category": "hardcoded-secrets",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_SECRET_6"
+    }
+  ],
+  "note": "CKV_SECRET_* belongs to checkov's `secrets` framework, which the scanner does not enable (--framework terraform only). Expected to MISS until it does. Kept as a positive so the \u00a72 'hardcoded secrets' gap is measured, not assumed."
+}

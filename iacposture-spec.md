@@ -264,7 +264,7 @@ The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now a
 
 ## 7. Eval Plan
 
-1. **Detection recall**: labeled set of ~30-50 Terraform snippets with known injected vulnerabilities (drawn from CIS benchmark examples + hand-crafted edge cases) — measure what fraction Layer 1 + Layer 2 correctly find and correctly map. In v2, extend with ~15-20 hand-crafted/AI-generated Kubernetes manifest/Helm chart snippets and report recall per `iac_type`.
+1. **Detection recall**: labeled set of ~30-50 Terraform snippets with known injected vulnerabilities (drawn from CIS benchmark examples + hand-crafted edge cases) — measure what fraction Layer 1 + Layer 2 correctly find and correctly map. *Layer 1 half built: `corpus/eval/`, 40 cases, 97.0% as of 2026-09-10, with the corrections log that keeps the number non-circular. Layer 2 (mapping recall) still needs labelled control mappings.* In v2, extend with ~15-20 hand-crafted/AI-generated Kubernetes manifest/Helm chart snippets and report recall per `iac_type`.
 2. **Remediation safety**: for every proposed fix in the labeled set, measure (a) does self-check confirm the original finding cleared, (b) does the fix introduce any new findings
 3. **Fix acceptance rate**: once running against real PRs, track approved-unedited vs edited vs rejected per fix — the headline metric for the project writeup
 
@@ -306,7 +306,7 @@ What the sections above specify for the scanner versus what exists, as of 2026-0
 
 | # | Work | Spec | State | Why this position |
 |---|---|---|---|---|
-| 1 | **Eval harness** — labeled `.tf` cases with expected `(source, rule_id)` pairs, one command that scans them and reports detection recall | §7.1 | Not built. One unlabeled fixture; no number of any kind | §8 gates v2 on "eval numbers are solid" and there are none. Also the only honest way to find the §2 coverage gaps rather than assert them. Cheap. |
+| 1 | **Eval harness** — labeled `.tf` cases with expected `(source, rule_id)` pairs, one command that scans them and reports detection recall | §7.1 | **Built** — `corpus/eval/`. 40 cases, **97.0%** (65/67) on 2026-09-10. The two misses are named, source-verified scanner gaps: checkov's `CKV_AWS_60` ignores a bare `Principal = "*"`, and `CKV_SECRET_*` is off because the scanner enables only the `terraform` framework | §8 gated v2 on "eval numbers are solid"; there is now a number. Item 4 is where the secrets miss gets fixed, and this is the number that should move when it does |
 | 2 | **Manual trigger** — one command: upload a directory, scan, map, remediate | §8 v1 ("CLI or simple upload") | Not built. Today: `aws s3 cp`, three separate `aws lambda invoke`s, and hand-editing DynamoDB to move statuses | v1 specifies it, and it is what the harness runs on |
 | 3 | **Observability** — `tracing_config` on every Lambda; custom metric findings-per-scan; alarm on scanner errors | §4.1 | Not built. Log groups only | Cheap and DVA-C02 territory. Only became meaningful once `ScannerError` existed: before it, scanner failures were swallowed into empty results and an alarm would never have fired |
 | 4 | **Scan surface** — `.tfvars` and `.tf.json` in the snapshot; `--download-external-modules` so registry/git modules are scanned; a secret scanner | §2 goals: hardcoded secrets, unpinned module sources | The scanner reads `.tf` only, never runs `init`, and runs checkov with `--framework terraform` alone, so the `secrets` framework is off | After 1, so the coverage gain is measured rather than claimed |

@@ -1,0 +1,10 @@
+{
+  "description": "Module sourced from git with no ref",
+  "category": "unpinned-modules",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_TF_1"
+    }
+  ]
+}

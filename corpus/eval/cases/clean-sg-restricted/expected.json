@@ -1,0 +1,5 @@
+{
+  "description": "Security group with described, CIDR-restricted ingress -- should raise nothing",
+  "category": "clean-control",
+  "expected": []
+}

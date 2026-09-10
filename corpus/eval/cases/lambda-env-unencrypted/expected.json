@@ -1,0 +1,10 @@
+{
+  "description": "Lambda function with environment variables and no kms_key_arn",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_173"
+    }
+  ]
+}

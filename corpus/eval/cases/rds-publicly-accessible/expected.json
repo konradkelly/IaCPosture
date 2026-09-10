@@ -1,0 +1,14 @@
+{
+  "description": "RDS instance with publicly_accessible = true",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_17"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-rds-no-public-db-access"
+    }
+  ]
+}

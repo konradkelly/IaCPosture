@@ -1,0 +1,14 @@
+resource "aws_launch_configuration" "web" {
+  name_prefix                 = "web-"
+  image_id                    = "ami-0123456789abcdef0"
+  instance_type               = "t3.micro"
+  associate_public_ip_address = true
+
+  metadata_options {
+    http_tokens = "required"
+  }
+
+  root_block_device {
+    encrypted = true
+  }
+}

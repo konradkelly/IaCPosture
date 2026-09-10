@@ -1,0 +1,18 @@
+{
+  "description": "Managed policy allowing Action \"*\" on Resource \"*\"",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_62"
+    },
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_63"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-iam-no-policy-wildcards"
+    }
+  ]
+}

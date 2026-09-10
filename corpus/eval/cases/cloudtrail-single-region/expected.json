@@ -1,0 +1,14 @@
+{
+  "description": "CloudTrail trail with is_multi_region_trail = false",
+  "category": "logging-monitoring",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_67"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-cloudtrail-enable-all-regions"
+    }
+  ]
+}

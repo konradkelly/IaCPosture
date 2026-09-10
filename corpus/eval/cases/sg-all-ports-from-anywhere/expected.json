@@ -1,0 +1,14 @@
+{
+  "description": "Security group ingress on every port and protocol from 0.0.0.0/0",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_277"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-public-ingress-sgr"
+    }
+  ]
+}

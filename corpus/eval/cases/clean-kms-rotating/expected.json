@@ -1,0 +1,5 @@
+{
+  "description": "Customer-managed KMS key with rotation on and a scoped policy -- should raise nothing",
+  "category": "clean-control",
+  "expected": []
+}

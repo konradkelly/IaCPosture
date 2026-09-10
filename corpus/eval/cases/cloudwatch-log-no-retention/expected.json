@@ -1,0 +1,14 @@
+{
+  "description": "CloudWatch log group with no retention_in_days",
+  "category": "logging-monitoring",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_66"
+    },
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_338"
+    }
+  ]
+}

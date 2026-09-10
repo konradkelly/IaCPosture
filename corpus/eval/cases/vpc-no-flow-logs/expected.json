@@ -1,0 +1,14 @@
+{
+  "description": "VPC with no aws_flow_log attached",
+  "category": "logging-monitoring",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV2_AWS_11"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-require-vpc-flow-logs-for-all-vpcs"
+    }
+  ]
+}

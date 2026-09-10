@@ -1,0 +1,14 @@
+{
+  "description": "EC2 user_data exporting an AWS secret access key",
+  "category": "hardcoded-secrets",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_46"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-secrets-in-user-data"
+    }
+  ]
+}

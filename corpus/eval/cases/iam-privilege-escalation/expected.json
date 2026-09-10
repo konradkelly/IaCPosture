@@ -1,0 +1,11 @@
+{
+  "description": "Policy granting iam:PassRole plus lambda:CreateFunction and lambda:InvokeFunction",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_286"
+    }
+  ],
+  "note": "Relabelled after run 1: CKV_AWS_110 is the data-source variant (aws_iam_policy_document); the resource check on aws_iam_policy is CKV_AWS_286."
+}

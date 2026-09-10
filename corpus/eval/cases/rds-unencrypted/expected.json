@@ -1,0 +1,14 @@
+{
+  "description": "RDS instance with storage_encrypted = false",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_16"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-rds-encrypt-instance-storage-data"
+    }
+  ]
+}
