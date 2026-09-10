@@ -1,0 +1,15 @@
+{
+  "description": "S3 bucket with no aws_s3_bucket_logging",
+  "category": "logging-monitoring",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_18"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-s3-enable-bucket-logging"
+    }
+  ],
+  "note": "Fires many other S3 rules too; only the logging pair is expected here."
+}

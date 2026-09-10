@@ -1,0 +1,14 @@
+{
+  "description": "Inline policy attached directly to an IAM user rather than a group or role",
+  "category": "iam-over-permissioning",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_40"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-iam-no-user-attached-policies"
+    }
+  ]
+}

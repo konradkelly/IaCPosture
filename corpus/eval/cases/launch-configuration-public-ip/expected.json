@@ -1,0 +1,11 @@
+{
+  "description": "Launch configuration with associate_public_ip_address = true",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-public-ip"
+    }
+  ],
+  "note": "Third of three public-IP cases (instance, launch template, launch configuration), added to pin down which resource types tfsec's aws-ec2-no-public-ip actually covers. The short name is embedded in the deployed binary, so the rule exists."
+}

@@ -1,0 +1,14 @@
+{
+  "description": "Security group egress on every port to 0.0.0.0/0",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_382"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-public-egress-sgr"
+    }
+  ]
+}

@@ -36,3 +36,9 @@ a scanner rule with no confident mapping (e.g. pure hygiene checks like
 "add a description to this security group rule") is left unmapped rather
 than forced onto a control it doesn't really violate. Extend both files as
 new rule_ids turn up in real scans.
+
+## Not the corpus: `eval/`
+
+`eval/` is the detection-recall harness for `terraform-scanner` (spec §7.1),
+not control text. `upload.sh` does not sync it, and nothing at runtime reads
+it. See `eval/README.md`.

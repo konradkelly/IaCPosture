@@ -1,0 +1,14 @@
+{
+  "description": "Subnet with map_public_ip_on_launch = true",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_130"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-public-ip-subnet"
+    }
+  ]
+}

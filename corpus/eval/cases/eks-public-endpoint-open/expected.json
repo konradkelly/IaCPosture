@@ -1,0 +1,22 @@
+{
+  "description": "EKS cluster with a public endpoint reachable from 0.0.0.0/0",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_38"
+    },
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_39"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-eks-no-public-cluster-access"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-eks-no-public-cluster-access-to-cidr"
+    }
+  ]
+}

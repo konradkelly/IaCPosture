@@ -1,0 +1,14 @@
+{
+  "description": "Customer-managed KMS key with rotation disabled",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_7"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-kms-auto-rotate-keys"
+    }
+  ]
+}

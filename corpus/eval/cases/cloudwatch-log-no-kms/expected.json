@@ -1,0 +1,14 @@
+{
+  "description": "CloudWatch log group with no kms_key_id",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_158"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-cloudwatch-log-group-customer-key"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "description": "S3 bucket with no server-side encryption configuration",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_145"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-s3-enable-bucket-encryption"
+    }
+  ],
+  "note": "Fires many other S3 rules too; only the encryption pair is expected here."
+}

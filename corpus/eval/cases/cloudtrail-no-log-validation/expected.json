@@ -1,0 +1,14 @@
+{
+  "description": "CloudTrail trail with enable_log_file_validation = false",
+  "category": "logging-monitoring",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_36"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-cloudtrail-enable-log-validation"
+    }
+  ]
+}

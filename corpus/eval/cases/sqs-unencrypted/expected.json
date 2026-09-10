@@ -1,0 +1,14 @@
+{
+  "description": "SQS queue with no encryption",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_27"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-sqs-enable-queue-encryption"
+    }
+  ]
+}

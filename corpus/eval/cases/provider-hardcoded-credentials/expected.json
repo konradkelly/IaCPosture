@@ -1,0 +1,10 @@
+{
+  "description": "AWS provider block with literal access_key and secret_key",
+  "category": "hardcoded-secrets",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_41"
+    }
+  ]
+}

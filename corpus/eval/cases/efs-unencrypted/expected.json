@@ -1,0 +1,14 @@
+{
+  "description": "EFS file system with encrypted = false",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_42"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-efs-enable-at-rest-encryption"
+    }
+  ]
+}

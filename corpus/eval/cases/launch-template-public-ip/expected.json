@@ -1,0 +1,11 @@
+{
+  "description": "Launch template network interface with associate_public_ip_address = true",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_88"
+    }
+  ],
+  "note": "Relabelled after run 3. tfsec's aws-ec2-no-public-ip fires on aws_launch_configuration only (see launch-configuration-public-ip); aws_instance and aws_launch_template are tfsec-blind for public IPs. checkov's CKV_AWS_88 covers all three."
+}

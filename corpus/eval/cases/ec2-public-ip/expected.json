@@ -1,0 +1,11 @@
+{
+  "description": "EC2 instance with associate_public_ip_address = true",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_88"
+    }
+  ],
+  "note": "Relabelled after run 1: tfsec raised nothing on an aws_instance with a public IP. Its aws-ec2-no-public-ip rule targets launch configurations/templates -- see launch-template-public-ip."
+}

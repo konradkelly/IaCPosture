@@ -1,0 +1,11 @@
+{
+  "description": "Module sourced from the public registry with no version constraint",
+  "category": "unpinned-modules",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_TF_2"
+    }
+  ],
+  "note": "Neither rule verified against source for the registry form; the run decides."
+}

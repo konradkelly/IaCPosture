@@ -1,0 +1,14 @@
+{
+  "description": "SNS topic with no kms_master_key_id",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_26"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-sns-enable-topic-encryption"
+    }
+  ]
+}

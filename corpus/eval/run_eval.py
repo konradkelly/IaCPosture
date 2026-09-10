@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Detection-recall harness for terraform-scanner (spec §7.1, §8.2 item 1).
+
+Uploads every case under cases/ to one S3 prefix, invokes the deployed
+scanner ONCE with persist=false, and compares what fired against each case's
+expected.json. One invocation rather than one per case: the scanner walks
+the prefix recursively and tfsec/checkov treat each subdirectory as its own
+module, so 37 cases cost one cold start instead of 37.
+
+The deployed function is used rather than local binaries on purpose. Recall
+against the tools as actually packaged and versioned in the layer is the
+number that matters; a local tfsec of a different version would measure
+something else. It also means the harness needs AWS credentials and the
+dev stack up.
+
+Usage:
+  python run_eval.py                       # bucket from `terraform output`
+  python run_eval.py --bucket NAME --function NAME
+  python run_eval.py --report results.json # also write the full result
+  python run_eval.py --keep                # leave the S3 prefix for inspection
+
+Recall is per expected (source, rule_id) pair: hit if that pair fired on
+that case's file at least once. Extra findings are reported, never counted
+against recall -- a case labelled for its encryption pair will also raise a
+dozen other S3 rules, and that is correct behaviour, not noise. The
+exception is clean-control cases, which expect nothing, so anything they
+raise is a false positive and is reported as such.
+"""
+
+import argparse
+import collections
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+import boto3
+
+HERE = pathlib.Path(__file__).resolve().parent
+CASES = HERE / "cases"
+
+
+def bucket_from_terraform():
+    out = subprocess.run(
+        ["terraform", "output", "-raw", "artifacts_bucket_name"],
+        cwd=HERE.parent.parent / "terraform", capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def load_cases():
+    cases = {}
+    for d in sorted(p for p in CASES.iterdir() if p.is_dir()):
+        expected = json.loads((d / "expected.json").read_text(encoding="utf-8"))
+        cases[d.name] = {
+            "tf": (d / "main.tf").read_text(encoding="utf-8"),
+            "category": expected["category"],
+            "description": expected["description"],
+            "expected": {(e["source"], e["rule_id"]) for e in expected["expected"]},
+        }
+    return cases
+
+
+def upload(s3, bucket, prefix, cases):
+    for name, c in cases.items():
+        s3.put_object(Bucket=bucket, Key=f"{prefix}{name}/main.tf", Body=c["tf"].encode("utf-8"))
+
+
+def scan(lam, function, prefix, run_id):
+    payload = {"pr_id": run_id, "s3_prefix": prefix, "iac_type": "terraform", "persist": False}
+    resp = lam.invoke(FunctionName=function, InvocationType="RequestResponse",
+                      Payload=json.dumps(payload).encode("utf-8"))
+    body = json.loads(resp["Payload"].read())
+    if "FunctionError" in resp:
+        sys.exit(f"terraform-scanner failed: {body}")
+    return body
+
+
+def delete_prefix(s3, bucket, prefix):
+    keys = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        keys += [{"Key": o["Key"]} for o in page.get("Contents", [])]
+    for i in range(0, len(keys), 1000):
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": keys[i:i + 1000]})
+
+
+def evaluate(cases, scan_body):
+    fired = collections.defaultdict(set)
+    for f in scan_body["findings"]:
+        case_name = f["file"].split("/", 1)[0]
+        fired[case_name].add((f["source"], f["rule_id"]))
+
+    unparsed = {e.split("/", 1)[0] for e in scan_body.get("scan_errors", [])}
+
+    results = {}
+    for name, c in cases.items():
+        got = fired.get(name, set())
+        hits = c["expected"] & got
+        results[name] = {
+            "category": c["category"],
+            "expected": sorted(c["expected"]),
+            "hit": sorted(hits),
+            "missed": sorted(c["expected"] - got),
+            "unexpected": sorted(got - c["expected"]),
+            "parse_error": name in unparsed,
+        }
+    return results
+
+
+def summarise(results):
+    def recall(rows):
+        exp = sum(len(r["expected"]) for r in rows)
+        hit = sum(len(r["hit"]) for r in rows)
+        return hit, exp
+
+    positives = [r for r in results.values() if r["category"] != "clean-control"]
+    controls = [r for r in results.values() if r["category"] == "clean-control"]
+
+    by_cat = collections.defaultdict(list)
+    for r in positives:
+        by_cat[r["category"]].append(r)
+    by_src = collections.defaultdict(lambda: [0, 0])
+    for r in positives:
+        for src, _ in r["expected"]:
+            by_src[src][1] += 1
+        for src, _ in r["hit"]:
+            by_src[src][0] += 1
+
+    hit, exp = recall(positives)
+    return {
+        "overall": {"hit": hit, "expected": exp, "recall": hit / exp if exp else None},
+        "by_category": {k: dict(zip(("hit", "expected"), recall(v))) for k, v in sorted(by_cat.items())},
+        "by_source": {k: {"hit": v[0], "expected": v[1]} for k, v in sorted(by_src.items())},
+        "clean_controls": {r_name: r["unexpected"] for r_name, r in results.items()
+                           if r["category"] == "clean-control" and r["unexpected"]},
+        "parse_errors": [n for n, r in results.items() if r["parse_error"]],
+        "cases": len(results),
+        "positives": len(positives),
+        "controls": len(controls),
+    }
+
+
+def print_report(results, summary):
+    o = summary["overall"]
+    print(f"\n{'=' * 70}")
+    print(f"DETECTION RECALL  {o['hit']}/{o['expected']}  =  {o['recall']:.1%}"
+          f"   ({summary['positives']} positive cases, {summary['controls']} clean controls)")
+    print("=" * 70)
+
+    print("\nby category")
+    for cat, v in summary["by_category"].items():
+        pct = v["hit"] / v["expected"] if v["expected"] else 0
+        print(f"  {cat:24s} {v['hit']:3d}/{v['expected']:<3d}  {pct:6.1%}")
+
+    print("\nby source")
+    for src, v in summary["by_source"].items():
+        pct = v["hit"] / v["expected"] if v["expected"] else 0
+        print(f"  {src:24s} {v['hit']:3d}/{v['expected']:<3d}  {pct:6.1%}")
+
+    misses = [(n, r) for n, r in results.items() if r["missed"]]
+    print(f"\nmissed ({sum(len(r['missed']) for _, r in misses)})")
+    for name, r in misses:
+        for src, rid in r["missed"]:
+            print(f"  {name:34s} {src:8s} {rid}")
+
+    if summary["clean_controls"]:
+        print("\nclean controls that raised something (false positives)")
+        for name, unexpected in summary["clean_controls"].items():
+            for src, rid in unexpected:
+                print(f"  {name:34s} {src:8s} {rid}")
+    else:
+        print("\nclean controls: nothing raised")
+
+    if summary["parse_errors"]:
+        print(f"\nCASES THAT DID NOT PARSE: {summary['parse_errors']}")
+    print()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bucket", help="artifacts bucket (default: terraform output)")
+    ap.add_argument("--function", default="iacposture-dev-terraform-scanner")
+    ap.add_argument("--report", type=pathlib.Path, help="write full per-case results as JSON")
+    ap.add_argument("--keep", action="store_true", help="leave the S3 prefix in place afterwards")
+    args = ap.parse_args()
+
+    bucket = args.bucket or bucket_from_terraform()
+    cases = load_cases()
+    run_id = f"eval-{time.strftime('%Y%m%dT%H%M%S')}"
+    prefix = f"scans/{run_id}/"
+
+    s3 = boto3.client("s3")
+    lam = boto3.client("lambda")
+
+    print(f"{len(cases)} cases -> s3://{bucket}/{prefix}")
+    upload(s3, bucket, prefix, cases)
+
+    print(f"invoking {args.function} once ...", end="", flush=True)
+    t0 = time.time()
+    try:
+        body = scan(lam, args.function, prefix, run_id)
+    finally:
+        if not args.keep:
+            delete_prefix(s3, bucket, prefix)
+    print(f" {time.time() - t0:.0f}s, {body['finding_count']} findings")
+
+    results = evaluate(cases, body)
+    summary = summarise(results)
+    print_report(results, summary)
+
+    if args.report:
+        args.report.write_text(json.dumps({
+            "run_id": run_id, "function": args.function, "summary": summary,
+            "results": results, "raw_finding_count": body["finding_count"],
+        }, indent=2), encoding="utf-8")
+        print(f"full results -> {args.report}")
+
+
+if __name__ == "__main__":
+    main()

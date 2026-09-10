@@ -1,0 +1,14 @@
+{
+  "description": "Security group ingress on 3389/tcp from 0.0.0.0/0",
+  "category": "network-exposure",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_25"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-ec2-no-public-ingress-sgr"
+    }
+  ]
+}
