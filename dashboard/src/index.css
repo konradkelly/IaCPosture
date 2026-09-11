@@ -791,6 +791,14 @@ textarea {
   color: var(--danger);
 }
 
+/* Written by the system, never by a reviewer: an edit upstream invalidated a
+   fix that had already been decided. Coloured apart from the three human
+   actions so it doesn't read as somebody's decision. */
+.audit-trail__action--reopened {
+  background: var(--warn-dim);
+  color: var(--warn);
+}
+
 .audit-trail__actor {
   font-weight: 500;
   color: var(--text-heading);

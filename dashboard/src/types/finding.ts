@@ -14,6 +14,12 @@ export type FindingStatus =
 
 export type ReviewAction = 'approved' | 'edited' | 'rejected'
 
+/** What can appear in an audit trail. "reopened" is never submitted by a
+ *  person: the system writes it when an edit upstream invalidates a fix that
+ *  had already been accepted. Kept distinct from ReviewAction so it cannot be
+ *  posted to the review endpoint by mistake. */
+export type AuditAction = ReviewAction | 'reopened'
+
 export interface ControlMapping {
   framework: string
   control_id: string
@@ -57,13 +63,33 @@ export interface ProposedFix {
    *  cleanly unless these have been applied first. Preserved across a
    *  reviewer's edit, unlike the self-check fields, because editing a diff
    *  does not change what it is rooted on. */
-  applies_after?: string[]
+  applies_after?: Prerequisite[]
+  /** Set by the system when a prerequisite was edited after this fix was
+   *  drafted on it, which sends the fix back to needs-human-only however it
+   *  had been decided before. Explains why a fix the reviewer remembers
+   *  resolving is open again. */
+  stale_reason?: string
   /** Files the scanner could not parse when rescanning the fix. Non-empty means
    *  the fix was never actually verified -- an unparseable file produces no
    *  findings, which the self-check would otherwise read as the finding having
    *  been cleared. Distinct from a fix that was verified and failed, and the
    *  reviewer has to be told which one this is. */
   scan_errors?: string[]
+}
+
+/** One link in a fix chain: an earlier finding on the same file whose fix
+ *  this one was drafted on top of.
+ *
+ *  diff_sha256 is a hash of that prerequisite's diff *as it stood when this
+ *  fix was drafted*, which is what makes staleness detectable without either
+ *  side reconstructing file content: if the reviewer edits the prerequisite,
+ *  the hash stops matching and this fix is known to be rooted on something
+ *  that no longer exists. Optional because records written before the chain
+ *  carried hashes are still readable; absent means unverifiable, not fresh.
+ */
+export interface Prerequisite {
+  finding_id: string
+  diff_sha256?: string
 }
 
 export interface Finding {
@@ -91,7 +117,7 @@ export interface ReviewEvent {
   finding_id: string
   pr_id?: string
   actor: string
-  action: ReviewAction
+  action: AuditAction
   notes?: string
   /** The diff a reviewer submitted with an "edited" decision, stored verbatim
    *  on the event so the audit record is self-contained even if the finding
@@ -117,6 +143,10 @@ export interface ReviewResponse {
   action: ReviewAction
   status: string | null
   recorded_at: string
+  /** Fixes this decision sent back to needs-human-only, because they were
+   *  drafted on the diff it just replaced. Surfaced to the reviewer who caused
+   *  it rather than left to appear in someone else's queue. */
+  reopened_dependents?: string[]
 }
 
 export interface ApiError {

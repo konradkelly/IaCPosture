@@ -8,6 +8,7 @@ per that README's guidance to keep ground truth accurate.
 """
 
 import collections
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -852,9 +853,17 @@ def test_each_fix_is_drafted_against_the_previous_accepted_fix(
     assert "aws_s3_bucket_logging" in second_written[":pf"]["diff"]
     assert SSE_MARKER not in second_written[":pf"]["diff"]
 
-    # The dependency is recorded, so a reviewer is not left to infer it.
+    # The dependency is recorded, so a reviewer is not left to infer it --
+    # and it carries a hash of the prerequisite's diff *as drafted*, which is
+    # what lets review-api later tell an intact prerequisite from an edited
+    # one without reconstructing any file content.
     assert _written(mock_table, 0)[":pf"]["applies_after"] == []
-    assert second_written[":pf"]["applies_after"] == [pair[0]["finding_id"]]
+    assert second_written[":pf"]["applies_after"] == [{
+        "finding_id": pair[0]["finding_id"],
+        "diff_sha256": hashlib.sha256(
+            _written(mock_table, 0)[":pf"]["diff"].encode("utf-8")
+        ).hexdigest(),
+    }]
 
 
 @patch.object(handler, "_get_anthropic_client")
@@ -935,7 +944,12 @@ def test_a_fix_held_for_human_review_still_advances_the_chain(
     assert result["needs_human_only_count"] == 1
     assert result["fix_proposed_count"] == 1
     assert SSE_MARKER in _prompt_of(mock_get_client, 1)
-    assert _written(mock_table, 1)[":pf"]["applies_after"] == [pair[0]["finding_id"]]
+    assert _written(mock_table, 1)[":pf"]["applies_after"] == [{
+        "finding_id": pair[0]["finding_id"],
+        "diff_sha256": hashlib.sha256(
+            _written(mock_table, 0)[":pf"]["diff"].encode("utf-8")
+        ).hexdigest(),
+    }]
 
 
 @patch.object(handler, "_get_anthropic_client")

@@ -7,6 +7,12 @@ interface ReviewActionsProps {
   /** Why the actions are disabled, shown above the buttons. Without this a
    *  reviewer just sees dead controls and reasonably reads it as a bug. */
   disabledReason?: string
+  /** Keep Reject live while approve and edit are disabled. Set when the block
+   *  is an unmet fix-chain prerequisite: refusing a fix is always coherent and
+   *  is the reviewer's only way out of a chain that cannot be assembled, so
+   *  disabling it would trap them. Notes stay editable for the same reason --
+   *  a rejection is exactly the decision that wants explaining. */
+  allowReject?: boolean
   /** The proposed diff to prefill the edit textarea with. Approve-with-edits
    *  is hidden entirely when this is absent -- there's nothing to edit. */
   currentDiff?: string
@@ -16,6 +22,7 @@ interface ReviewActionsProps {
 export function ReviewActions({
   disabled,
   disabledReason,
+  allowReject,
   currentDiff,
   onSubmit,
 }: ReviewActionsProps) {
@@ -73,7 +80,7 @@ export function ReviewActions({
           onChange={(e) => setNotes(e.target.value)}
           placeholder="Why you approved, edited, or rejected this fix…"
           rows={3}
-          disabled={disabled || submitting}
+          disabled={(disabled && !allowReject) || submitting}
         />
       </div>
 
@@ -119,7 +126,7 @@ export function ReviewActions({
             <button
               type="button"
               className="btn btn--reject"
-              disabled={disabled || submitting}
+              disabled={(disabled && !allowReject) || submitting}
               onClick={() => handleAction('rejected')}
             >
               Reject fix

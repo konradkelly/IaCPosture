@@ -29,6 +29,7 @@ Event shape:
 
 import collections
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -72,6 +73,10 @@ class _Outcome(typing.NamedTuple):
     scanner_verified: bool
     content: str | None
     rescan_counts: "collections.Counter | None"
+    # This fix's diff, kept so the next fix in the file can record a hash of
+    # it in its own applies_after. Only set when scanner_verified, for the
+    # same reason content is: an unverified fix never becomes a base.
+    diff: str | None
 
 
 REMEDIATION_OUTPUT_SCHEMA = {
@@ -186,7 +191,15 @@ def handler(event, context):
 
                 base_content = outcome.content
                 baseline_counts = outcome.rescan_counts
-                applies_after.append(finding["finding_id"])
+                # The hash is what makes staleness detectable at review time:
+                # review-api compares it against the prerequisite's *current*
+                # diff, so a reviewer editing an earlier fix invalidates every
+                # fix drafted on top of it without either side reconstructing
+                # file content. See docs/fix-chain-review-spec.md §2.
+                applies_after.append({
+                    "finding_id": finding["finding_id"],
+                    "diff_sha256": _diff_sha256(outcome.diff),
+                })
 
     return {
         "pr_id": pr_id,
@@ -252,7 +265,7 @@ def _remediate_finding(pr_id, finding, base_content, baseline_counts, applies_af
             self_check_passed=False, self_check_new_findings=[], cleared=False,
             suppression_attempt=suppressions, applies_after=applies_after,
         )
-        return _Outcome(False, False, None, None)
+        return _Outcome(False, False, None, None, None)
 
     _upload_scratch_file(pr_id, finding_id, file_path, corrected_content)
     rescan_findings, scan_errors = _invoke_self_check(pr_id, finding_id)
@@ -273,7 +286,7 @@ def _remediate_finding(pr_id, finding, base_content, baseline_counts, applies_af
             assumptions=assumptions, scan_errors=scan_errors,
             applies_after=applies_after,
         )
-        return _Outcome(False, False, None, None)
+        return _Outcome(False, False, None, None, None)
 
     self_check_passed, self_check_new_findings, cleared = _evaluate_self_check(
         finding, rescan_findings, baseline_counts
@@ -310,6 +323,7 @@ def _remediate_finding(pr_id, finding, base_content, baseline_counts, applies_af
         scanner_verified,
         corrected_content if scanner_verified else None,
         rescan_counts if scanner_verified else None,
+        diff_text if scanner_verified else None,
     )
 
 
@@ -625,6 +639,21 @@ def _write_superseded(finding, superseded_by):
     )
 
 
+def _diff_sha256(diff_text):
+    """Hash of a fix's diff, recorded by every fix drafted on top of it.
+
+    Hashing the diff rather than the resulting file content is deliberate: the
+    alternative would make review-api reconstruct the base by applying the
+    approved chain, i.e. implement diff application inside a Lambda. Because
+    applies_after carries the cumulative chain rather than just the immediate
+    predecessor, matching every recorded hash is enough to prove the composed
+    base is bit-identical -- each fix's output is fixed by its own base and
+    diff, and the first base is the scan snapshot, which is written once per
+    run into a versioned bucket. See docs/fix-chain-review-spec.md §3.
+    """
+    return hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+
+
 def _write_result(
     finding, diff_text, rationale, self_check_passed, self_check_new_findings, cleared,
     suppression_attempt=None, dropped_resources=None, assumptions=None, scan_errors=None,
@@ -656,7 +685,9 @@ def _write_result(
                 # this project carries several findings, so most fixes are not
                 # independent: applying this diff without these first will not
                 # apply cleanly, and approving it without them lands a fix
-                # whose context never existed.
+                # whose context never existed. Each entry is
+                # {finding_id, diff_sha256}; the hash is what lets review-api
+                # tell "prerequisite was edited" from "prerequisite is intact".
                 "applies_after": applies_after or [],
                 # Files the scanner couldn't parse. Non-empty means the fix was
                 # never actually verified -- distinct from a fix that was

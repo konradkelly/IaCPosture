@@ -15,6 +15,7 @@ which is where a review's `actor` comes from. See _actor_from_claims.
 """
 
 import decimal
+import hashlib
 import json
 import logging
 import os
@@ -175,6 +176,21 @@ def _post_review(pr_id, finding_id, raw_body, event):
     if action in RESOLVING_ACTIONS and proposed_fix is None:
         return _error(409, "finding has no proposed fix to act on")
 
+    # Checked before the ReviewEvent is written: a blocked decision is not an
+    # attempted decision, and should leave no trace in the audit trail.
+    # Rejection is never blocked -- it is always safe, and it is the reviewer's
+    # only escape hatch from a chain gone bad.
+    if action in RESOLVING_ACTIONS:
+        unmet = _unmet_prerequisites(pr_id, proposed_fix)
+        if unmet:
+            logger.info(
+                "%s of finding %s blocked on prerequisites: %s", action, finding_id, unmet,
+            )
+            return _response(409, {
+                "error": "fix depends on prerequisites that are not satisfied",
+                "unmet": unmet,
+            })
+
     now = datetime.now(timezone.utc).isoformat()
     table = dynamodb.Table(DYNAMODB_TABLE)
 
@@ -235,15 +251,173 @@ def _post_review(pr_id, finding_id, raw_body, event):
             ExpressionAttributeValues=values,
         )
 
+    # An edit replaced this fix's diff, so every fix drafted on top of it is
+    # now rooted on content that no longer exists. _unmet_prerequisites catches
+    # that when the dependent is reviewed; it does nothing for a dependent
+    # already approved, because that decision has already happened and nothing
+    # re-examines it. Approve f1, approve f2, then edit f1 is a supported
+    # sequence -- "resolved" is not terminal and repeat edits are deliberate --
+    # so without this the stale dependent sits there marked resolved and
+    # unassemblable. See docs/fix-chain-review-spec.md §4.
+    #
+    # Only on "edited": approving or rejecting leaves the diff untouched, and
+    # it is the diff these dependents were drafted against.
+    reopened = []
+    if action == "edited":
+        reopened = _reopen_dependents(pr_id, finding_id, actor, now)
+
     return _ok({
         "finding_id": finding_id,
         "action": action,
         "status": status,
         "recorded_at": now,
+        # Named in the response so the reviewer who caused the cascade learns
+        # about it immediately, rather than finding it later in someone else's
+        # queue.
+        "reopened_dependents": reopened,
     })
 
 
 # ---------- helpers ----------
+
+def _reopen_dependents(pr_id, edited_finding_id, actor, now):
+    """Return every fix drafted on top of this one to human review.
+
+    Reads the whole PR partition, which _list_findings already does for the
+    dashboard, and filters for findings naming this one as a prerequisite.
+    There is no reverse index and no need for one: chains are per-file and the
+    partition is a single PR's findings.
+
+    Each dependent gets stale_reason, so the dashboard can say *why* a fix it
+    previously showed as resolved is open again, and a ReviewEvent with actor
+    "system". That event is the point. A machine is reopening a decision a
+    human recorded, and an audit log whose purpose is that nothing is silently
+    decided cannot let that happen off the books.
+
+    Status goes to needs-human-only regardless of what it was: the dependent's
+    self-check was run against a base that has since changed, so it no longer
+    evidences anything, whatever it concluded at the time.
+    """
+    table = dynamodb.Table(DYNAMODB_TABLE)
+    reopened = []
+
+    for candidate in _list_findings(pr_id)["findings"]:
+        candidate_id = candidate.get("finding_id")
+        if candidate_id == edited_finding_id:
+            continue
+
+        proposed_fix = candidate.get("proposed_fix") or {}
+        chain = proposed_fix.get("applies_after") or []
+        depends = any(
+            (entry.get("finding_id") if isinstance(entry, dict) else entry) == edited_finding_id
+            for entry in chain
+        )
+        if not depends:
+            continue
+
+        stale_reason = (
+            f"Prerequisite {edited_finding_id} was edited by {actor} at {now}, "
+            "so this fix is drafted against content that no longer exists. "
+            "It needs redrafting against the edited base before it can be applied."
+        )
+        table.update_item(
+            Key={"pk": f"PR#{pr_id}", "sk": f"FINDING#{candidate_id}"},
+            UpdateExpression=(
+                "SET #status = :status, proposed_fix.stale_reason = :reason, updated_at = :now"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": "needs-human-only",
+                ":reason": stale_reason,
+                ":now": now,
+            },
+        )
+        table.put_item(Item={
+            "pk": _event_pk(pr_id, candidate_id),
+            # Suffixed so a cascade cannot collide with the edit that caused
+            # it, which carries the same timestamp.
+            "sk": f"EVENT#{now}#system",
+            "finding_id": candidate_id,
+            "pr_id": pr_id,
+            "actor": "system",
+            "action": "reopened",
+            "notes": stale_reason,
+            "edited_diff": None,
+            "created_at": now,
+        })
+        reopened.append(candidate_id)
+
+    if reopened:
+        logger.info(
+            "edit of %s reopened dependent findings %s", edited_finding_id, reopened,
+        )
+    return reopened
+
+
+def _unmet_prerequisites(pr_id, proposed_fix):
+    """Prerequisites of this fix that can't currently be satisfied.
+
+    A prerequisite is an earlier finding on the same file whose fix this one
+    was drafted on top of, so this diff's context lines describe the file
+    *with that fix applied*. Approving a dependent whose base never lands
+    yields an approved set nobody can assemble, and until now nothing said so.
+
+    Returns a list of {finding_id, reason}, naming every blocker at once so a
+    reviewer sees the whole blocking set rather than discovering it one 409 at
+    a time. Empty means every prerequisite is satisfied and unchanged.
+    """
+    unmet = []
+    for entry in proposed_fix.get("applies_after") or []:
+        # Entries were bare id strings before the chain carried hashes, and
+        # findings written by that build are still readable. They can't be
+        # verified, so they fail closed rather than being waved through.
+        if not isinstance(entry, dict):
+            unmet.append({"finding_id": str(entry), "reason": "unverifiable"})
+            continue
+
+        prerequisite_id = entry.get("finding_id")
+        prerequisite = _get_finding(pr_id, prerequisite_id)
+        if prerequisite is None:
+            unmet.append({"finding_id": prerequisite_id, "reason": "missing"})
+            continue
+
+        # Satisfaction is the *latest* ReviewEvent, not status. status is a
+        # lossy cache of the last resolving action and is never retracted: a
+        # rejection deliberately leaves it alone, so approving a finding and
+        # then rejecting it leaves status "resolved" while the standing
+        # decision on it is a rejection. A status check reads that as
+        # satisfied. The event log is the only place the truth survives.
+        events = _list_events(pr_id, prerequisite_id)["events"]
+        if not events:
+            unmet.append({"finding_id": prerequisite_id, "reason": "undecided"})
+            continue
+        if max(events, key=lambda e: e["sk"])["action"] not in RESOLVING_ACTIONS:
+            unmet.append({"finding_id": prerequisite_id, "reason": "rejected"})
+            continue
+
+        # Absent is not the same as fresh.
+        recorded_hash = entry.get("diff_sha256")
+        if not recorded_hash:
+            unmet.append({"finding_id": prerequisite_id, "reason": "unverifiable"})
+            continue
+
+        # Distinct from "rejected", and the distinction is actionable: a stale
+        # dependent is redrafted against the new base, a rejected one against
+        # the chain minus that link. A rejected prerequisite's content is
+        # unchanged, so its hash still matches -- the two checks catch
+        # genuinely different failures.
+        prerequisite_fix = prerequisite.get("proposed_fix") or {}
+        current_diff = prerequisite_fix.get("diff")
+        if current_diff is None or _diff_sha256(current_diff) != recorded_hash:
+            unmet.append({"finding_id": prerequisite_id, "reason": "stale"})
+
+    return unmet
+
+
+def _diff_sha256(diff_text):
+    """Must stay identical to remediation-agent's helper of the same name."""
+    return hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+
 
 def _query_all(table, **kwargs):
     """Query to exhaustion -- a single Query caps at 1MB of items."""

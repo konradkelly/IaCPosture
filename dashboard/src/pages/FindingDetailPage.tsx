@@ -4,6 +4,7 @@ import {
   ApiClientError,
   getFinding,
   listEvents,
+  listFindings,
   postReview,
 } from '../api/client'
 import { AuditTrail } from '../components/AuditTrail'
@@ -13,7 +14,71 @@ import { ReviewActions } from '../components/ReviewActions'
 import { SelfCheckBadge } from '../components/SelfCheckBadge'
 import { SeverityBadge } from '../components/SeverityBadge'
 import { StatusBadge } from '../components/StatusBadge'
-import type { Finding, ReviewEvent } from '../types/finding'
+import type { Finding, Prerequisite, ReviewEvent } from '../types/finding'
+
+/** Hex SHA-256, matching remediation-agent's _diff_sha256 byte for byte.
+ *  crypto.subtle needs a secure context, which both CloudFront and localhost
+ *  are. */
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+/** Entries were bare id strings before the chain carried hashes. */
+function normalizePrerequisite(entry: Prerequisite | string): Prerequisite {
+  return typeof entry === 'string' ? { finding_id: entry } : entry
+}
+
+interface UnmetPrerequisite {
+  finding_id: string
+  reason: 'missing' | 'unresolved' | 'stale' | 'unverifiable'
+}
+
+const UNMET_EXPLANATION: Record<UnmetPrerequisite['reason'], string> = {
+  missing: 'no longer exists',
+  unresolved: 'has not been accepted yet',
+  stale: 'was edited after this fix was drafted on it',
+  unverifiable: 'was recorded without a hash, so it cannot be checked',
+}
+
+/** Which of this fix's prerequisites currently block accepting it.
+ *
+ *  This is the affordance, not the guarantee -- review-api runs the
+ *  authoritative check and 409s regardless of what the page believes. It is
+ *  deliberately the weaker check of the two: the page has each prerequisite's
+ *  status but not its event log, so it cannot tell a rejection from a decision
+ *  never made, and reports both as "unresolved". The server can, and says
+ *  which. */
+async function findUnmetPrerequisites(
+  chain: Prerequisite[],
+  byId: Map<string, Finding>,
+): Promise<UnmetPrerequisite[]> {
+  const unmet: UnmetPrerequisite[] = []
+
+  for (const entry of chain.map(normalizePrerequisite)) {
+    const prerequisite = byId.get(entry.finding_id)
+    if (!prerequisite) {
+      unmet.push({ finding_id: entry.finding_id, reason: 'missing' })
+      continue
+    }
+    if (prerequisite.status !== 'resolved') {
+      unmet.push({ finding_id: entry.finding_id, reason: 'unresolved' })
+      continue
+    }
+    if (!entry.diff_sha256) {
+      unmet.push({ finding_id: entry.finding_id, reason: 'unverifiable' })
+      continue
+    }
+    const currentDiff = prerequisite.proposed_fix?.diff
+    if (currentDiff === undefined || (await sha256Hex(currentDiff)) !== entry.diff_sha256) {
+      unmet.push({ finding_id: entry.finding_id, reason: 'stale' })
+    }
+  }
+
+  return unmet
+}
 
 export function FindingDetailPage() {
   const { prId, findingId } = useParams<{ prId: string; findingId: string }>()
@@ -23,6 +88,7 @@ export function FindingDetailPage() {
   const [eventsLoading, setEventsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showAgentDiff, setShowAgentDiff] = useState(false)
+  const [unmet, setUnmet] = useState<UnmetPrerequisite[]>([])
 
   const loadFinding = useCallback(async () => {
     if (!prId || !findingId) return
@@ -55,6 +121,31 @@ export function FindingDetailPage() {
     loadEvents()
   }, [loadFinding, loadEvents])
 
+  // Reads the whole PR partition to resolve the chain. Runs off `finding` so
+  // it re-evaluates after a review lands: approving a prerequisite in another
+  // tab should unblock this one on the next load, not stay stale.
+  useEffect(() => {
+    const chain = finding?.proposed_fix?.applies_after
+    if (!prId || !chain || chain.length === 0) return
+
+    let cancelled = false
+    listFindings(prId)
+      .then(async (data) => {
+        const byId = new Map(data.findings.map((f) => [f.finding_id, f]))
+        const result = await findUnmetPrerequisites(chain, byId)
+        // Blocking on a stale computation would be worse than not blocking:
+        // the server check still stands either way.
+        if (!cancelled) setUnmet(result)
+      })
+      .catch(() => {
+        if (!cancelled) setUnmet([])
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [prId, finding])
+
   async function handleReview(payload: {
     action: 'approved' | 'edited' | 'rejected'
     notes: string
@@ -85,6 +176,11 @@ export function FindingDetailPage() {
 
   const canReview = finding.status !== 'resolved'
   const awaitingRemediation = finding.status === 'raw' || finding.status === 'mapped'
+  const chain = finding.proposed_fix?.applies_after ?? []
+  // Derived rather than reset in the effect: state left over from the
+  // previously-viewed finding must not block this one.
+  const activeUnmet = chain.length > 0 ? unmet : []
+  const blockedByChain = activeUnmet.length > 0
   const showDiff =
     finding.proposed_fix?.diff &&
     (finding.status === 'fix-proposed' || finding.status === 'resolved')
@@ -182,6 +278,15 @@ export function FindingDetailPage() {
               </div>
             )}
 
+          {finding.proposed_fix.stale_reason && (
+            <div className="alert alert--warn">
+              <p>
+                <strong>This fix was reopened by the system.</strong>{' '}
+                {finding.proposed_fix.stale_reason}
+              </p>
+            </div>
+          )}
+
           {finding.proposed_fix.applies_after &&
             finding.proposed_fix.applies_after.length > 0 && (
               <div className="alert alert--warn">
@@ -196,13 +301,21 @@ export function FindingDetailPage() {
                   never existed. Review them first:
                 </p>
                 <ul>
-                  {finding.proposed_fix.applies_after.map((id) => (
-                    <li key={id}>
-                      <Link to={`/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(id)}`}>
-                        {id}
-                      </Link>
-                    </li>
-                  ))}
+                  {finding.proposed_fix.applies_after
+                    .map(normalizePrerequisite)
+                    .map((entry) => {
+                      const blocker = activeUnmet.find((u) => u.finding_id === entry.finding_id)
+                      return (
+                        <li key={entry.finding_id}>
+                          <Link
+                            to={`/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(entry.finding_id)}`}
+                          >
+                            {entry.finding_id}
+                          </Link>
+                          {blocker && <> — {UNMET_EXPLANATION[blocker.reason]}</>}
+                        </li>
+                      )
+                    })}
                 </ul>
               </div>
             )}
@@ -344,11 +457,18 @@ export function FindingDetailPage() {
 
       {canReview && (
         <ReviewActions
-          disabled={awaitingRemediation}
+          disabled={awaitingRemediation || blockedByChain}
+          // Reject stays live on a chain block, but not while remediation
+          // hasn't run: there is no fix to refuse yet.
+          allowReject={!awaitingRemediation && blockedByChain}
           disabledReason={
             awaitingRemediation
               ? 'Remediation has not run for this finding yet, so there is no proposed fix to accept or refuse. Review unlocks at status fix-proposed or needs-human-only.'
-              : undefined
+              : blockedByChain
+                ? `This fix is drafted on top of ${activeUnmet
+                    .map((u) => `${u.finding_id} (${UNMET_EXPLANATION[u.reason]})`)
+                    .join(', ')}. Accepting it would record a decision that cannot be carried out, so approve and edit are held until that is settled. You can still reject it.`
+                : undefined
           }
           currentDiff={finding.proposed_fix?.diff}
           onSubmit={handleReview}
