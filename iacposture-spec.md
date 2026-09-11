@@ -153,7 +153,9 @@ ReviewEvent (DynamoDB)
 ├── pk: PR#<pr_id>#FINDING#<finding_id>
 ├── sk: EVENT#<timestamp>
 ├── actor: reviewer id (from the verified JWT, never the request body)
-├── action: approved | edited | rejected
+├── action: approved | edited | rejected | reopened
+│     reopened is written by actor "system", never posted by a reviewer: an edit or
+│     rejection upstream invalidated a fix that had already been decided
 ├── edited_diff: the reviewer's diff, on an "edited" action
 └── notes
 ```

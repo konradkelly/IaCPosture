@@ -146,27 +146,39 @@ Cost: one `get_item` plus one event query per prerequisite. Chains are per-file
 and, since superseded findings no longer consume a link, shorter than the
 counts in §1.
 
-## 4. Cascade (phase 2)
+## 4. Cascade
 
-Section 3 catches staleness when the *dependent* is reviewed. It does not catch
-`f1` being edited **after** `f2` was already approved — `f2` is resolved and
-nothing re-examines it.
+*Built: `f0c50ae` (edit), then widened to rejection and to superseded findings.*
 
-On a resolving action that changes the diff (`edited`), reverse-look-up
-dependents and flag them:
+Section 3 catches an unmet prerequisite when the *dependent* is reviewed. It
+does nothing for a dependent already approved — that decision has happened,
+and nothing re-examines it. Approve `f1`, approve `f2`, then edit or reject
+`f1` is a supported workflow (`resolved` is not terminal; repeat decisions are
+tested behaviour), and without this the dependent sits there marked resolved
+and unassemblable. This is the other half of the guarantee.
 
-- `_list_findings(pr_id)` already reads the whole PR partition; filter for
-  findings whose `applies_after` contains this `finding_id`.
-- For each, set `proposed_fix.stale_reason` and return `status` to
-  `needs-human-only`, and write a ReviewEvent with `actor: "system"` recording
-  why — the audit trail must show that a machine reopened a human's decision.
+On `edited` **or `rejected`** — not `approved`, which leaves the diff both
+untouched and landing — `_reopen_dependents` reads the PR partition
+(`_list_findings` already does) and reopens two kinds of finding:
 
-Phase 2 only because section 3 must land first, **not** because the case is
-exotic. Approve `f1`, approve `f2`, then edit `f1` is a supported workflow —
-`resolved` is not terminal and repeat edits are a tested behaviour — and
-section 3 does nothing for it, because `f2`'s decision has already happened.
-Without this, the stale dependent sits there marked resolved and
-unassemblable. This is the other half of the guarantee.
+| relationship | goes to | why that status |
+|---|---|---|
+| names this fix in `applies_after` | `needs-human-only`, `proposed_fix.stale_reason` set | it has a proposal, drafted against a base that changed (edit) or is never landing (reject); it needs redrafting |
+| `superseded_by == this fix` | `mapped`, `superseded_by` removed | it never had a proposal — this fix cleared its rule as a side effect, and after an edit that may not hold; after a rejection it does not. `mapped` is what remediation-agent picks up, so the next run drafts it a fix for the first time |
+
+Every reopen writes a ReviewEvent with `actor: "system"`, `action: "reopened"`,
+and `sk` suffixed `#system` so it cannot collide with the human decision that
+caused it at the same timestamp. That event is the point: a machine reopening
+a human's decision has to be on the record.
+
+A reopened finding that is itself someone's prerequisite reports as
+`reopened` in §3, not `rejected` — the remedy differs. A rejected prerequisite
+is dropped from the chain; a reopened one is waiting to be redrafted.
+
+`stale_reason` is advisory. If `f1` is rejected and later approved again, its
+dependents keep the "rejected" reason text until re-reviewed, but §3 is the
+authority and will pass them once `f1`'s latest event resolves and the hash
+still matches.
 
 ## 5. Dashboard
 
@@ -206,9 +218,12 @@ The API is the guarantee; the UI is the affordance. Both, not either.
   shrink this problem, but it changes review semantics that were chosen
   deliberately, for every consumer of status and not just chains. Enforcement
   works either way, since it reads events.
-- [ ] Whether a *rejected* prerequisite should also invalidate downstream fixes
-  eagerly (it does not change their diffs, but it does guarantee they can never
-  be satisfied). Leaning yes, as part of phase 2.
+- [x] **A rejected prerequisite cascades too.** It does not change dependents'
+  diffs, but it guarantees they can never be applied, which is strictly worse
+  than the edit case. Decided by omission in `f0c50ae` as "no"; reversed.
+- [x] **Superseded findings are reopened by the cascade**, via `superseded_by`.
+  The supersede change promised that field was stored "so the reversal can
+  find it" and the first cascade did not look at it.
 
 ## 7. Tests
 
@@ -232,6 +247,12 @@ remediation-agent:
 - `applies_after` entries carry `finding_id` and the prerequisite's `diff_sha256`
 - the hash matches what a later `sha256` of that prerequisite's stored diff gives
 
-Phase 2:
+Cascade:
 - editing `f1` returns an approved `f2` to `needs-human-only` with a system event
+- rejecting `f1` does the same, with a reason that says the base is never landing
+- editing or rejecting `f1` returns a finding it superseded to `mapped`, removes
+  `superseded_by`, writes no `stale_reason` (nothing to hang it on)
+- a reopened prerequisite blocks with reason `reopened`, not `rejected`
 - a finding with no dependents is untouched
+- both Lambdas' `_diff_sha256` agree on the same input — the "must stay
+  identical" comment, enforced
