@@ -3,6 +3,7 @@
 import decimal
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -703,6 +704,111 @@ def test_editing_a_fix_reopens_the_dependents_drafted_on_it(mock_table):
     assert len(system_events) == 1
     assert system_events[0]["pk"] == "PR#manual-1#FINDING#dependent1"
     assert system_events[0]["action"] == "reopened"
+
+
+def test_rejecting_a_fix_reopens_the_dependents_drafted_on_it(mock_table):
+    """The other way a base stops being real. An edit changes it; a rejection
+    means it is never landing. Approve f1, approve f2, reject f1 left f2
+    resolved and unassemblable, with nothing reaching forward to say so."""
+    mock_table.get_item.return_value = {"Item": FINDING}
+    mock_table.query.return_value = {"Items": [FINDING, DEPENDENT]}
+
+    response = handler.handler(_review("rejected"), None)
+
+    assert response["statusCode"] == 200
+    assert _body(response)["reopened_dependents"] == ["dependent1"]
+
+    values = _updates_for(mock_table, "dependent1")[0].kwargs["ExpressionAttributeValues"]
+    assert values[":status"] == "needs-human-only"
+    assert "rejected" in values[":reason"]
+    # The remedy differs from the edit case and the reason has to say so.
+    assert "never landing" in values[":reason"]
+
+    system_events = [
+        call.kwargs["Item"] for call in mock_table.put_item.call_args_list
+        if call.kwargs["Item"]["actor"] == "system"
+    ]
+    assert len(system_events) == 1
+    assert system_events[0]["action"] == "reopened"
+
+
+SUPERSEDED = {
+    **FINDING,
+    "sk": "FINDING#shadowed1",
+    "finding_id": "shadowed1",
+    "rule_id": "aws-s3-block-public-acls",
+    "status": "superseded",
+    "superseded_by": "abc123",
+    "proposed_fix": None,
+}
+
+
+@pytest.mark.parametrize("action,kwargs", [
+    ("edited", {"edited_diff": "reviewer version"}),
+    ("rejected", {}),
+])
+def test_changing_a_fix_returns_the_findings_it_superseded_to_mapped(mock_table, action, kwargs):
+    """A superseded finding never had a fix of its own: this one cleared its
+    rule as a side effect. After an edit that may no longer be so; after a
+    rejection it certainly is not. It goes back to mapped -- not
+    needs-human-only, because there is no proposal to review -- so the next
+    remediation run drafts it a fix for the first time. superseded_by is
+    stored precisely so this reversal can find it."""
+    mock_table.get_item.return_value = {"Item": FINDING}
+    mock_table.query.return_value = {"Items": [FINDING, SUPERSEDED]}
+
+    response = handler.handler(_review(action, **kwargs), None)
+
+    assert response["statusCode"] == 200
+    assert _body(response)["reopened_dependents"] == ["shadowed1"]
+
+    update = _updates_for(mock_table, "shadowed1")[0].kwargs
+    assert update["ExpressionAttributeValues"][":status"] == "mapped"
+    assert "REMOVE superseded_by" in update["UpdateExpression"]
+    # No proposed_fix to hang a stale_reason on; the event carries the why.
+    assert "stale_reason" not in update["UpdateExpression"]
+
+    system_events = [
+        call.kwargs["Item"] for call in mock_table.put_item.call_args_list
+        if call.kwargs["Item"]["actor"] == "system"
+    ]
+    assert len(system_events) == 1
+    assert system_events[0]["pk"] == "PR#manual-1#FINDING#shadowed1"
+    assert "abc123" in system_events[0]["notes"]
+
+
+def test_approve_is_blocked_with_reason_reopened_not_rejected(mock_table):
+    """A reopened prerequisite is the system's doing, and the remedy differs:
+    a rejected one is dropped from the chain, a reopened one is waiting to be
+    redrafted and re-reviewed. Reporting it as "rejected" would send the
+    reviewer to the wrong fix."""
+    _chain(mock_table, _dependent(SATISFIED), PREREQ, [
+        _event_item("approved", "2026-01-01"),
+        {"sk": "EVENT#2026-01-02#system", "action": "reopened", "actor": "system"},
+    ])
+
+    response = handler.handler(_review("approved"), None)
+
+    assert response["statusCode"] == 409
+    assert _unmet(response) == [{"finding_id": "earlier1", "reason": "reopened"}]
+
+
+def test_the_two_lambdas_hash_a_diff_identically():
+    """review-api compares the hash remediation-agent recorded. They are
+    separate deployables with no shared module, so the helper is duplicated
+    and a comment says it must stay identical. This is that comment,
+    enforced."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "remediation_handler",
+        Path(__file__).parents[1] / "remediation-agent" / "handler.py",
+    )
+    remediation = importlib.util.module_from_spec(spec)
+    with patch.dict("sys.modules", {"anthropic": MagicMock()}):
+        spec.loader.exec_module(remediation)
+
+    diff = "--- a/main.tf\n+++ b/main.tf\n@@ -1 +1 @@\n-old\n+new\n"
+    assert handler._diff_sha256(diff) == remediation._diff_sha256(diff)
 
 
 def test_a_finding_with_no_dependents_is_untouched_by_an_edit(mock_table):

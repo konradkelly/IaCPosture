@@ -251,20 +251,26 @@ def _post_review(pr_id, finding_id, raw_body, event):
             ExpressionAttributeValues=values,
         )
 
-    # An edit replaced this fix's diff, so every fix drafted on top of it is
-    # now rooted on content that no longer exists. _unmet_prerequisites catches
-    # that when the dependent is reviewed; it does nothing for a dependent
-    # already approved, because that decision has already happened and nothing
-    # re-examines it. Approve f1, approve f2, then edit f1 is a supported
-    # sequence -- "resolved" is not terminal and repeat edits are deliberate --
-    # so without this the stale dependent sits there marked resolved and
-    # unassemblable. See docs/fix-chain-review-spec.md §4.
+    # An edit replaces this fix's diff, so every fix drafted on top of it is
+    # now rooted on content that no longer exists; a rejection means that
+    # content is never landing at all. _unmet_prerequisites catches both when
+    # the dependent is reviewed; it does nothing for a dependent already
+    # approved, because that decision has already happened and nothing
+    # re-examines it. Approve f1, approve f2, then edit or reject f1 is a
+    # supported sequence -- "resolved" is not terminal and repeat decisions are
+    # deliberate -- so without this the dependent sits there marked resolved
+    # and unassemblable. See docs/fix-chain-review-spec.md §4.
     #
-    # Only on "edited": approving or rejecting leaves the diff untouched, and
+    # Two kinds of dependent. A fix drafted on top of this one (applies_after)
+    # goes back to needs-human-only to be redrafted. A finding this fix
+    # superseded (superseded_by) goes back to mapped: it never had a fix of its
+    # own, because this one cleared its rule, and that may no longer be true.
+    #
+    # Not on "approved": approving leaves the diff untouched and landing, and
     # it is the diff these dependents were drafted against.
     reopened = []
-    if action == "edited":
-        reopened = _reopen_dependents(pr_id, finding_id, actor, now)
+    if action in ("edited", "rejected"):
+        reopened = _reopen_dependents(pr_id, finding_id, action, actor, now)
 
     return _ok({
         "finding_id": finding_id,
@@ -280,46 +286,85 @@ def _post_review(pr_id, finding_id, raw_body, event):
 
 # ---------- helpers ----------
 
-def _reopen_dependents(pr_id, edited_finding_id, actor, now):
-    """Return every fix drafted on top of this one to human review.
+def _reopen_dependents(pr_id, changed_finding_id, action, actor, now):
+    """Reopen everything whose state rested on this fix, after it was edited or
+    rejected.
 
     Reads the whole PR partition, which _list_findings already does for the
-    dashboard, and filters for findings naming this one as a prerequisite.
-    There is no reverse index and no need for one: chains are per-file and the
-    partition is a single PR's findings.
+    dashboard, and filters for findings that name this one. There is no
+    reverse index and no need for one: chains are per-file and the partition
+    is a single PR's findings.
 
-    Each dependent gets stale_reason, so the dashboard can say *why* a fix it
-    previously showed as resolved is open again, and a ReviewEvent with actor
-    "system". That event is the point. A machine is reopening a decision a
-    human recorded, and an audit log whose purpose is that nothing is silently
-    decided cannot let that happen off the books.
+    Two relationships qualify, and they reopen differently:
 
-    Status goes to needs-human-only regardless of what it was: the dependent's
-    self-check was run against a base that has since changed, so it no longer
-    evidences anything, whatever it concluded at the time.
+    - A fix drafted on top of this one (this id in its applies_after) goes to
+      needs-human-only with stale_reason set, so the dashboard can say *why*
+      a fix it previously showed as resolved is open again. Its self-check ran
+      against a base that has since changed or will never land, so it no
+      longer evidences anything, whatever it concluded at the time.
+    - A finding this fix superseded (superseded_by == this id) goes to mapped
+      and loses superseded_by. It never had a fix of its own -- this fix
+      cleared its rule as a side effect, and after an edit that may no longer
+      be so; after a rejection it certainly is not. mapped is what
+      remediation-agent picks up, so the next run drafts it a fix for the
+      first time. No stale_reason: there is no proposed_fix to put it on.
+
+    Every reopen writes a ReviewEvent with actor "system". That event is the
+    point. A machine is reopening a decision a human recorded, and an audit
+    log whose purpose is that nothing is silently decided cannot let that
+    happen off the books.
     """
     table = dynamodb.Table(DYNAMODB_TABLE)
     reopened = []
 
+    if action == "edited":
+        because = (
+            f"Prerequisite {changed_finding_id} was edited by {actor} at {now}, "
+            "so this fix is drafted against content that no longer exists. "
+            "It needs redrafting against the edited base before it can be applied."
+        )
+        superseded_because = (
+            f"The fix that had cleared this finding, {changed_finding_id}, was edited by "
+            f"{actor} at {now}, so it may no longer clear it. Returned to mapped for a "
+            "fix of its own."
+        )
+    else:
+        because = (
+            f"Prerequisite {changed_finding_id} was rejected by {actor} at {now}, "
+            "so the base this fix is drafted against is never landing. "
+            "It needs redrafting against the chain without that fix."
+        )
+        superseded_because = (
+            f"The fix that had cleared this finding, {changed_finding_id}, was rejected by "
+            f"{actor} at {now}, so nothing clears it now. Returned to mapped for a fix of "
+            "its own."
+        )
+
     for candidate in _list_findings(pr_id)["findings"]:
         candidate_id = candidate.get("finding_id")
-        if candidate_id == edited_finding_id:
+        if candidate_id == changed_finding_id:
+            continue
+
+        if candidate.get("superseded_by") == changed_finding_id:
+            table.update_item(
+                Key={"pk": f"PR#{pr_id}", "sk": f"FINDING#{candidate_id}"},
+                UpdateExpression="SET #status = :status, updated_at = :now REMOVE superseded_by",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={":status": "mapped", ":now": now},
+            )
+            _write_system_event(table, pr_id, candidate_id, now, superseded_because)
+            reopened.append(candidate_id)
             continue
 
         proposed_fix = candidate.get("proposed_fix") or {}
         chain = proposed_fix.get("applies_after") or []
         depends = any(
-            (entry.get("finding_id") if isinstance(entry, dict) else entry) == edited_finding_id
+            (entry.get("finding_id") if isinstance(entry, dict) else entry) == changed_finding_id
             for entry in chain
         )
         if not depends:
             continue
 
-        stale_reason = (
-            f"Prerequisite {edited_finding_id} was edited by {actor} at {now}, "
-            "so this fix is drafted against content that no longer exists. "
-            "It needs redrafting against the edited base before it can be applied."
-        )
         table.update_item(
             Key={"pk": f"PR#{pr_id}", "sk": f"FINDING#{candidate_id}"},
             UpdateExpression=(
@@ -328,30 +373,34 @@ def _reopen_dependents(pr_id, edited_finding_id, actor, now):
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
                 ":status": "needs-human-only",
-                ":reason": stale_reason,
+                ":reason": because,
                 ":now": now,
             },
         )
-        table.put_item(Item={
-            "pk": _event_pk(pr_id, candidate_id),
-            # Suffixed so a cascade cannot collide with the edit that caused
-            # it, which carries the same timestamp.
-            "sk": f"EVENT#{now}#system",
-            "finding_id": candidate_id,
-            "pr_id": pr_id,
-            "actor": "system",
-            "action": "reopened",
-            "notes": stale_reason,
-            "edited_diff": None,
-            "created_at": now,
-        })
+        _write_system_event(table, pr_id, candidate_id, now, because)
         reopened.append(candidate_id)
 
     if reopened:
         logger.info(
-            "edit of %s reopened dependent findings %s", edited_finding_id, reopened,
+            "%s of %s reopened dependent findings %s", action, changed_finding_id, reopened,
         )
     return reopened
+
+
+def _write_system_event(table, pr_id, finding_id, now, notes):
+    table.put_item(Item={
+        "pk": _event_pk(pr_id, finding_id),
+        # Suffixed so a cascade cannot collide with the decision that caused
+        # it, which carries the same timestamp.
+        "sk": f"EVENT#{now}#system",
+        "finding_id": finding_id,
+        "pr_id": pr_id,
+        "actor": "system",
+        "action": "reopened",
+        "notes": notes,
+        "edited_diff": None,
+        "created_at": now,
+    })
 
 
 def _unmet_prerequisites(pr_id, proposed_fix):
@@ -391,8 +440,13 @@ def _unmet_prerequisites(pr_id, proposed_fix):
         if not events:
             unmet.append({"finding_id": prerequisite_id, "reason": "undecided"})
             continue
-        if max(events, key=lambda e: e["sk"])["action"] not in RESOLVING_ACTIONS:
-            unmet.append({"finding_id": prerequisite_id, "reason": "rejected"})
+        latest = max(events, key=lambda e: e["sk"])["action"]
+        if latest not in RESOLVING_ACTIONS:
+            # "reopened" is the system's doing, not a reviewer's, and the
+            # remedy differs: a rejected prerequisite is dropped from the
+            # chain, a reopened one is waiting to be redrafted and re-reviewed.
+            reason = "reopened" if latest == "reopened" else "rejected"
+            unmet.append({"finding_id": prerequisite_id, "reason": reason})
             continue
 
         # Absent is not the same as fresh.
