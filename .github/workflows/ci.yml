@@ -1,0 +1,80 @@
+# Runs the checks that were previously only run by whoever remembered to.
+#
+# Deliberately does nothing with AWS. Every suite mocks its clients, so the
+# workflow needs no credentials and no OIDC role, and adding either would make
+# a test run capable of touching real infrastructure -- which is the opposite
+# of what a scanner project wants from its own CI.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to a branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lambda-tests:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One red suite shouldn't hide the state of the other two.
+      fail-fast: false
+      matrix:
+        # mapping-agent is absent because it has no tests yet, not because it
+        # is excluded. Add it here when it gets some.
+        suite: [review-api, remediation-agent, terraform-scanner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the Lambda runtime the layers are built against
+          # (public.ecr.aws/lambda/python:3.12), so a version-specific failure
+          # shows up here rather than after deploy.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: python -m pip install -r requirements-dev.txt
+
+      - name: pytest
+        # Each suite runs from its own directory because the test files do a
+        # bare `import handler`, and there is no package layout making the
+        # handlers importable from the repo root.
+        working-directory: lambda/${{ matrix.suite }}
+        env:
+          # Not a real region and nothing is called with it. boto3 clients are
+          # built at module import, before any test patches them, and without
+          # this every suite dies at collection with NoRegionError.
+          AWS_DEFAULT_REGION: us-west-2
+        run: python -m pytest -q
+
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - working-directory: dashboard
+        run: npm ci
+
+      - name: oxlint
+        working-directory: dashboard
+        run: npm run lint
+
+      - name: tsc + vite build
+        working-directory: dashboard
+        # The type check is the point. `npm run build` runs `tsc -b` first, so
+        # a bad type -- a fix-chain entry read as a string, say -- fails here
+        # rather than in someone's browser.
+        run: npm run build

@@ -1,0 +1,26 @@
+# Test-only dependencies for the Lambda suites. Nothing here is deployed:
+# the runtime gets boto3 from the Lambda image and anthropic from the layer
+# built by layers/anthropic/build.sh, so this file exists purely so `pytest`
+# can import the handlers outside AWS.
+#
+# anthropic is listed because remediation-agent and mapping-agent import it at
+# module scope, which happens at collection time whether or not a test calls
+# the API.
+#
+# Pinned to what the suites were last verified green against (2026-09-10:
+# review-api 42, remediation-agent 39, terraform-scanner 16). Bump
+# deliberately, not incidentally.
+#
+#   python -m venv .venv
+#   .venv/Scripts/python -m pip install -r requirements-dev.txt   # Windows
+#   .venv/bin/python -m pip install -r requirements-dev.txt       # Linux/macOS
+#
+# Each suite runs from its own directory -- the test files do a bare
+# `import handler` -- and AWS_DEFAULT_REGION must be set, because the boto3
+# clients are constructed at import before any test can patch them:
+#
+#   cd lambda/review-api && AWS_DEFAULT_REGION=us-west-2 python -m pytest -q
+
+anthropic==1.5.0
+boto3==1.43.92
+pytest==9.1.1
