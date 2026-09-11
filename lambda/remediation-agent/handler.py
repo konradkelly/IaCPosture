@@ -141,6 +141,16 @@ def handler(event, context):
             # finding that is genuinely resolved would be written up as a fix
             # that failed to clear it.
             target = (finding.get("source"), finding.get("rule_id"))
+            # cleared_by only knows about fixes drafted in this run. A rule the
+            # accepted chain already took to zero -- which is what a baseline
+            # of 0 means when there is a root -- was cleared by that chain, and
+            # the root is the fix whose content was just rescanned to prove it.
+            # Observed live before this existed: two findings an approved fix
+            # had cleared were drafted anyway, the model returned the file
+            # unchanged saying the rule was already satisfied, and the empty
+            # diff was scored `cleared=False`.
+            if target not in cleared_by and applies_after and baseline_counts[target] == 0:
+                cleared_by[target] = applies_after[-1]["finding_id"]
             if target in cleared_by:
                 logger.info(
                     "finding %s superseded by %s", finding["finding_id"], cleared_by[target],

@@ -1171,6 +1171,48 @@ def test_a_rejected_fix_is_not_a_root(
     assert mock_lambda_client.invoke.call_count == 1
 
 
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_rule_the_accepted_root_already_cleared_is_superseded_by_it(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """cleared_by only knows about fixes drafted in this run. A rule the
+    accepted chain already took to zero has to be recognised from the root's
+    counts, or the finding is drafted anyway -- and it was, live: the model
+    returned the file unchanged saying the rule was already satisfied, and
+    the empty diff scored `cleared=False`. Two model calls, two findings
+    marked as failed fixes that were in fact resolved."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    accepted = _accepted("f1")
+    # The accepted fix cleared encryption. This finding is on that very rule,
+    # reopened to mapped (its superseder was edited) and back for a fix.
+    already_cleared = _mapped("aws-s3-enable-bucket-encryption", 1, "s1")
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": [already_cleared]},
+        {"Items": before["findings"] + [accepted, already_cleared]},
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: ACCEPTED_CONTENT.encode())}
+    # The root's rescan: encryption is gone.
+    mock_lambda_client.invoke.side_effect = [_scan_reply(after)]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["superseded_count"] == 1
+    assert result["needs_human_only_count"] == 0
+    # Never drafted, never self-checked.
+    mock_get_client.return_value.messages.create.assert_not_called()
+    assert mock_lambda_client.invoke.call_count == 1
+    values = _written(mock_table, 0)
+    assert values[":status"] == "superseded"
+    assert values[":by"] == "f1"
+
+
 def test_the_root_is_the_accepted_fix_with_the_longest_chain():
     """applies_after is cumulative, so the longest chain has every other
     accepted fix already applied. Anything else would drop a fix."""

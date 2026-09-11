@@ -81,6 +81,15 @@ the accepted state of the file, which is what `stale_reason` promised.
 The rejected case falls out for free: a rejected `f1` is not accepted, so it
 is not in the base, so `f2` is redrafted against the chain without it.
 
+**A rule the accepted root already cleared supersedes by the root.** The
+in-run `cleared_by` map only knows about fixes drafted in the current run.
+When there is a root and a `mapped` finding's rule is already at zero in the
+root's counts, the accepted chain cleared it, and the root — the fix whose
+content was just rescanned to prove it — is recorded as `superseded_by`.
+Found live: two findings an approved fix had cleared were drafted anyway,
+the model returned the file unchanged saying the rule was already
+satisfied, and the empty diff scored `cleared=False`.
+
 ### 2.4 Rejection retracts `resolved`
 
 `status` is a lossy cache of the last resolving action and is never

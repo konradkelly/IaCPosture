@@ -440,19 +440,48 @@ def _reopen_dependents(pr_id, changed_finding_id, action, actor, now):
             "its own."
         )
 
-    for candidate in _list_findings(pr_id)["findings"]:
+    candidates = _list_findings(pr_id)["findings"]
+    # A chain dependent about to be redrafted may itself have superseded
+    # findings -- its old draft cleared their rules as a side effect. The
+    # redraft is a new draft and the claim has to be re-earned, so those are
+    # reopened too. One extra hop is enough: supersede is not transitive
+    # (a superseded finding has no fix to supersede anything with), and
+    # applies_after is cumulative, so every chain dependent names the changed
+    # fix directly. Observed live before this existed: f2 was reopened and
+    # redrafted while a finding superseded by f2's *old* draft stayed
+    # superseded, pointing at a diff that no longer existed.
+    chain_dependent_ids = {
+        c.get("finding_id") for c in candidates
+        if c.get("finding_id") != changed_finding_id and any(
+            (e.get("finding_id") if isinstance(e, dict) else e) == changed_finding_id
+            for e in ((c.get("proposed_fix") or {}).get("applies_after") or [])
+        )
+    }
+    supersede_roots = {changed_finding_id} | chain_dependent_ids
+
+    for candidate in candidates:
         candidate_id = candidate.get("finding_id")
         if candidate_id == changed_finding_id:
             continue
 
-        if candidate.get("superseded_by") == changed_finding_id:
+        superseder = candidate.get("superseded_by")
+        if superseder in supersede_roots:
             table.update_item(
                 Key={"pk": f"PR#{pr_id}", "sk": f"FINDING#{candidate_id}"},
                 UpdateExpression="SET #status = :status, updated_at = :now REMOVE superseded_by",
                 ExpressionAttributeNames={"#status": "status"},
                 ExpressionAttributeValues={":status": "mapped", ":now": now},
             )
-            _write_system_event(table, pr_id, candidate_id, now, superseded_because)
+            if superseder == changed_finding_id:
+                note = superseded_because
+            else:
+                note = (
+                    f"The fix that had cleared this finding, {superseder}, is being redrafted "
+                    f"because its own prerequisite {changed_finding_id} was {action} by {actor} "
+                    f"at {now}. Whether the redraft still clears it is not yet known. "
+                    "Returned to mapped for a fix of its own."
+                )
+            _write_system_event(table, pr_id, candidate_id, now, note)
             reopened.append(candidate_id)
             continue
 
