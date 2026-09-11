@@ -163,7 +163,7 @@ untouched and landing — `_reopen_dependents` reads the PR partition
 
 | relationship | goes to | why that status |
 |---|---|---|
-| names this fix in `applies_after` | `needs-human-only`, `proposed_fix.stale_reason` set | it has a proposal, drafted against a base that changed (edit) or is never landing (reject); it needs redrafting |
+| names this fix in `applies_after` | `mapped`, `proposed_fix.stale_reason` set | it has a proposal, drafted against a base that changed (edit) or is never landing (reject); it needs redrafting, and `mapped` is what the redraft picks up — `_chain_root` starts it from the last accepted fix (`docs/reviewer-edit-spec.md`) |
 | `superseded_by == this fix` | `mapped`, `superseded_by` removed | it never had a proposal — this fix cleared its rule as a side effect, and after an edit that may not hold; after a rejection it does not. `mapped` is what remediation-agent picks up, so the next run drafts it a fix for the first time |
 
 Every reopen writes a ReviewEvent with `actor: "system"`, `action: "reopened"`,

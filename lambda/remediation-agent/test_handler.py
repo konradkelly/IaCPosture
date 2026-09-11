@@ -31,7 +31,7 @@ def _read_fixture_tf(name, side):
 
 
 def _pairs(scan_response):
-    """Baseline occurrence counts, matching _query_baseline_counts."""
+    """Baseline occurrence counts, as _chain_root derives them for a pristine root."""
     return collections.Counter(
         (f["source"], f["rule_id"]) for f in scan_response["findings"]
     )
@@ -223,7 +223,7 @@ def test_a_suppressing_fix_is_rejected_before_it_is_ever_scanned(
     mock_table = MagicMock()
     mock_table.query.side_effect = [
         {"Items": [finding]},           # _query_mapped_findings
-        {"Items": before["findings"]},  # _query_baseline_counts, once for the file
+        {"Items": before["findings"]},  # _chain_root's findings-on-file query
     ]
     mock_dynamodb.Table.return_value = mock_table
 
@@ -612,7 +612,7 @@ def test_handler_marks_fix_proposed_on_clean_self_check(mock_dynamodb, mock_s3, 
 
     mock_s3.put_object.assert_called_once()
     put_kwargs = mock_s3.put_object.call_args.kwargs
-    assert put_kwargs["Key"] == f"scans/self-checks/fixture-s3-enc-before/{finding['finding_id']}/main.tf"
+    assert put_kwargs["Key"] == f"fixes/fixture-s3-enc-before/{finding['finding_id']}/main.tf"
 
     mock_table.update_item.assert_called_once()
     update_kwargs = mock_table.update_item.call_args.kwargs
@@ -700,7 +700,7 @@ def test_handler_isolates_a_failing_finding_and_keeps_going(
     mock_table = MagicMock()
     mock_table.query.side_effect = [
         {"Items": pair},               # _query_mapped_findings
-        {"Items": before["findings"]}, # _query_baseline_counts, once for the file
+        {"Items": before["findings"]}, # _chain_root's findings-on-file query
     ]
     mock_dynamodb.Table.return_value = mock_table
 
@@ -1069,6 +1069,158 @@ def test_a_partially_cleared_rule_does_not_supersede(
     assert result["superseded_count"] == 0
     assert result["fix_proposed_count"] == 2
     assert mock_get_client.return_value.messages.create.call_count == 2
+
+
+# ---------- chain root: where a file's chain starts ----------
+
+ACCEPTED_DIFF = "--- a/main.tf\n+++ b/main.tf\n@@ -1 +1 @@\n-old\n+accepted\n"
+ACCEPTED_CONTENT = "accepted\n"
+
+
+def _accepted(finding_id, applies_after=(), status="resolved"):
+    return {
+        **_mapped("aws-s3-enable-bucket-encryption", 1, finding_id),
+        "status": status,
+        "proposed_fix": {"diff": ACCEPTED_DIFF, "applies_after": list(applies_after)},
+    }
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_chain_roots_at_the_last_accepted_fix_not_the_snapshot(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """After a reviewer accepts f1, a reopened f2 returned to mapped must be
+    redrafted on top of f1's content -- the edited content, if it was edited.
+    Rooting at the snapshot would redraft f2 against a file with no f1 in it,
+    and it would collide with f1 on application: the original problem."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    accepted = _accepted("f1")
+    to_redraft = _mapped(LOGGING_RULE, 2, "f2")
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": [to_redraft]},                              # mapped
+        {"Items": before["findings"] + [accepted, to_redraft]},  # on file
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: ACCEPTED_CONTENT.encode())}
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
+        "corrected_file_content": ACCEPTED_CONTENT + 'resource "aws_s3_bucket_logging" "l" {}\n',
+        "rationale": "Added logging.", "assumptions": [],
+    })
+    after_both = {"findings": [f for f in after["findings"] if f["rule_id"] != LOGGING_RULE]}
+    mock_lambda_client.invoke.side_effect = [
+        _scan_reply(after),        # rescan of the accepted root
+        _scan_reply(after_both),   # self-check of f2's redraft
+    ]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["fix_proposed_count"] == 1
+    # The base was read from the accepted fix's content, not the snapshot.
+    assert mock_s3.get_object.call_args.kwargs["Key"] == "fixes/chain-1/f1/main.tf"
+    assert ACCEPTED_CONTENT in _prompt_of(mock_get_client, 0)
+    # The root was rescanned to get its counts, then the redraft self-checked.
+    assert mock_lambda_client.invoke.call_count == 2
+    # And the redraft records the accepted fix as what it is built on.
+    written = _written(mock_table, 0)
+    assert written[":pf"]["applies_after"] == [
+        {"finding_id": "f1", "diff_sha256": handler._diff_sha256(ACCEPTED_DIFF)}
+    ]
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_a_rejected_fix_is_not_a_root(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """A rejection now sets needs-human-only, so status is enough to say a
+    fix is not landing. The chain starts from the snapshot as if the fix had
+    never been drafted -- which is what "the chain without that fix" means."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    after = _load_fixture("s3-bucket-encryption", "after")
+    rejected = _accepted("f1", status="needs-human-only")
+    to_redraft = _mapped("aws-s3-enable-bucket-encryption", 1, "f2")
+    original = _read_fixture_tf("s3-bucket-encryption", "before")
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": [to_redraft]},
+        {"Items": before["findings"] + [rejected, to_redraft]},
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: original.encode())}
+    mock_get_client.return_value.messages.create.return_value = _fake_anthropic_response({
+        "corrected_file_content": _read_fixture_tf("s3-bucket-encryption", "after"),
+        "rationale": "Added SSE.", "assumptions": [],
+    })
+    mock_lambda_client.invoke.side_effect = [_scan_reply(after)]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["fix_proposed_count"] == 1
+    assert mock_s3.get_object.call_args.kwargs["Key"] == "scans/chain-1/main.tf"
+    assert _written(mock_table, 0)[":pf"]["applies_after"] == []
+    # No root rescan: the snapshot's counts are already in the table.
+    assert mock_lambda_client.invoke.call_count == 1
+
+
+def test_the_root_is_the_accepted_fix_with_the_longest_chain():
+    """applies_after is cumulative, so the longest chain has every other
+    accepted fix already applied. Anything else would drop a fix."""
+    with patch.object(handler, "dynamodb") as mock_dynamodb, \
+            patch.object(handler, "s3") as mock_s3, \
+            patch.object(handler, "_invoke_self_check", return_value=([], [])):
+        mock_table = MagicMock()
+        mock_table.query.return_value = {"Items": [
+            _accepted("f1"),
+            _accepted("f3", applies_after=[{"finding_id": "f1"}, {"finding_id": "f2"}]),
+            _accepted("f2", applies_after=[{"finding_id": "f1"}]),
+        ]}
+        mock_dynamodb.Table.return_value = mock_table
+        mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: b"x")}
+
+        _, _, chain = handler._chain_root("chain-1", "main.tf")
+
+    assert [c["finding_id"] for c in chain] == ["f1", "f2", "f3"]
+    assert mock_s3.get_object.call_args.kwargs["Key"] == "fixes/chain-1/f3/main.tf"
+
+
+@patch.object(handler, "_get_anthropic_client")
+@patch.object(handler, "lambda_client")
+@patch.object(handler, "s3")
+@patch.object(handler, "dynamodb")
+def test_an_accepted_fix_that_does_not_parse_fails_the_whole_file(
+    mock_dynamodb, mock_s3, mock_lambda_client, mock_get_client
+):
+    """A reviewer's edit can break the syntax, and it is now the base. Nothing
+    can be drafted on a file the scanner cannot read, so every mapped finding
+    on it errors out and stays mapped, rather than being drafted against a
+    base that yields zero findings and scores everything as cleared."""
+    before = _load_fixture("s3-bucket-encryption", "before")
+    to_redraft = [_mapped("a", 1, "f2"), _mapped("b", 2, "f3")]
+
+    mock_table = MagicMock()
+    mock_table.query.side_effect = [
+        {"Items": to_redraft},
+        {"Items": before["findings"] + [_accepted("f1")] + to_redraft},
+    ]
+    mock_dynamodb.Table.return_value = mock_table
+    mock_s3.get_object.return_value = {"Body": SimpleNamespace(read=lambda: b"broken {")}
+    mock_lambda_client.invoke.side_effect = [_scan_reply({"findings": [], "scan_errors": ["main.tf"]})]
+
+    result = handler.handler({"pr_id": "chain-1"}, None)
+
+    assert result["error_count"] == 2
+    assert result["fix_proposed_count"] == 0
+    mock_get_client.assert_not_called()
+    mock_table.update_item.assert_not_called()
 
 
 # ---------- pagination ----------

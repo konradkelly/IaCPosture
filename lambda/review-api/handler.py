@@ -15,6 +15,7 @@ which is where a review's `actor` comes from. See _actor_from_claims.
 """
 
 import decimal
+import difflib
 import hashlib
 import json
 import logging
@@ -27,13 +28,18 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE")
+ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET")
 
 dynamodb = boto3.resource("dynamodb")
+s3 = boto3.client("s3")
 
 # Reviewer actions, per spec §5's ReviewEvent.action enum. "approved"/"edited"
 # mean the human accepted a fix, so the finding becomes "resolved". "rejected"
-# refuses the proposed fix -- the underlying finding is still real, so its
-# status deliberately does not move.
+# refuses the proposed fix -- the underlying finding is still real, so it
+# goes to "needs-human-only" rather than staying wherever it was. It used to
+# leave status untouched, which meant a finding approved and later rejected
+# still read "resolved"; every consumer that needed the truth then had to
+# read the event log instead. See docs/reviewer-edit-spec.md §2.4.
 RESOLVING_ACTIONS = {"approved", "edited"}
 VALID_ACTIONS = RESOLVING_ACTIONS | {"rejected"}
 
@@ -63,6 +69,9 @@ def handler(event, context):
 
         if route_key == "GET /prs/{pr_id}/findings/{finding_id}/events":
             return _ok(_list_events(params["pr_id"], params["finding_id"]))
+
+        if route_key == "GET /prs/{pr_id}/findings/{finding_id}/content":
+            return _get_content(params["pr_id"], params["finding_id"])
 
         if route_key == "POST /prs/{pr_id}/findings/{finding_id}/review":
             return _post_review(
@@ -162,11 +171,19 @@ def _post_review(pr_id, finding_id, raw_body, event):
     # source of truth, and silently preferring it again would let a caller sign
     # someone else's name to a decision.
 
-    edited_diff = body.get("edited_diff")
-    if action == "edited" and not edited_diff:
-        return _error(400, "edited_diff is required when action is 'edited'")
-    if action != "edited" and edited_diff is not None:
-        return _error(400, "edited_diff is only valid when action is 'edited'")
+    # A reviewer edits the corrected *file*, not the diff, and this side
+    # computes the diff -- the same rule the spec applies to the LLM, for the
+    # same reason: a hand-authored diff may not apply to anything, a computed
+    # one always does. edited_diff is refused outright rather than accepted as
+    # a fallback, because a fallback is a path, and this one produced
+    # unvalidated input. See docs/reviewer-edit-spec.md §2.1.
+    if "edited_diff" in body:
+        return _error(400, "edited_diff is no longer accepted; send edited_content, the full corrected file")
+    edited_content = body.get("edited_content")
+    if action == "edited" and not edited_content:
+        return _error(400, "edited_content is required when action is 'edited'")
+    if action != "edited" and edited_content is not None:
+        return _error(400, "edited_content is only valid when action is 'edited'")
 
     finding = _get_finding(pr_id, finding_id)
     if finding is None:
@@ -175,6 +192,13 @@ def _post_review(pr_id, finding_id, raw_body, event):
     proposed_fix = finding.get("proposed_fix")
     if action in RESOLVING_ACTIONS and proposed_fix is None:
         return _error(409, "finding has no proposed fix to act on")
+
+    edited_diff = None
+    if action == "edited":
+        base = _read_base_content(pr_id, finding)
+        edited_diff = _unified_diff(base, edited_content, finding["file"])
+        if not edited_diff:
+            return _error(400, "edited_content is identical to the fix's base; nothing to record")
 
     # Checked before the ReviewEvent is written: a blocked decision is not an
     # attempted decision, and should leave no trace in the audit trail.
@@ -210,9 +234,26 @@ def _post_review(pr_id, finding_id, raw_body, event):
         "created_at": now,
     })
 
-    status = None
-    if action in RESOLVING_ACTIONS:
-        status = "resolved"
+    if action == "edited":
+        # Written before the record: from here on this content *is* the fix,
+        # and anything rooted on the fix -- a later chain, a re-self-check --
+        # reads it from here. A record that says "edited" with the agent's
+        # content still in S3 would be the worse failure.
+        s3.put_object(
+            Bucket=ARTIFACTS_BUCKET,
+            Key=_content_key(pr_id, finding_id, finding["file"]),
+            Body=edited_content.encode("utf-8"),
+        )
+
+    status = "resolved" if action in RESOLVING_ACTIONS else None
+    if action == "rejected" and proposed_fix is not None:
+        # There was a fix and the human refused it. The finding is not
+        # resolved, and it is not "fix-proposed" either -- that fix is off the
+        # table. A rejection of a finding with nothing proposed (rare, but the
+        # route allows it) records the event and moves nothing.
+        status = "needs-human-only"
+
+    if status is not None:
         update_expression = "SET #status = :status, updated_at = :now"
         values = {":status": status, ":now": now}
 
@@ -286,6 +327,61 @@ def _post_review(pr_id, finding_id, raw_body, event):
 
 # ---------- helpers ----------
 
+def _content_key(pr_id, finding_id, file_path):
+    """Where a fix's corrected file lives. Must match remediation-agent's
+    _self_check_prefix: the agent writes its draft here for the self-check,
+    and a reviewer's edit overwrites it, so one key is the fix's content
+    whoever last wrote it. Under fixes/, not scans/, because scans/ expires
+    and this does not get to."""
+    return f"fixes/{pr_id}/{finding_id}/{file_path}"
+
+
+def _read_s3(key):
+    obj = s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=key)
+    return obj["Body"].read().decode("utf-8")
+
+
+def _read_base_content(pr_id, finding):
+    """The file this fix was drafted against: the pristine snapshot for the
+    first fix in a file, otherwise the output of the last fix in its chain.
+    applies_after is cumulative, so the last entry's content already has every
+    earlier fix applied."""
+    chain = (finding.get("proposed_fix") or {}).get("applies_after") or []
+    if not chain:
+        return _read_s3(f"scans/{pr_id}/{finding['file']}")
+    last = chain[-1]
+    last_id = last.get("finding_id") if isinstance(last, dict) else last
+    return _read_s3(_content_key(pr_id, last_id, finding["file"]))
+
+
+def _unified_diff(base, corrected, file_path):
+    """Same call remediation-agent makes, so an agent diff and a reviewer diff
+    are the same kind of artifact."""
+    return "".join(difflib.unified_diff(
+        base.splitlines(keepends=True),
+        corrected.splitlines(keepends=True),
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+    ))
+
+
+def _get_content(pr_id, finding_id):
+    """The fix's current corrected file, for the dashboard to prefill an edit.
+
+    Read from S3 on each request rather than stored on the record: DynamoDB's
+    400KB item ceiling is not hypothetical for a module's main.tf."""
+    finding = _get_finding(pr_id, finding_id)
+    if finding is None:
+        return _error(404, "finding not found")
+    if not finding.get("proposed_fix"):
+        return _error(404, "finding has no proposed fix, so no corrected content")
+    try:
+        content = _read_s3(_content_key(pr_id, finding_id, finding["file"]))
+    except s3.exceptions.NoSuchKey:
+        return _error(404, "no corrected content stored for this fix")
+    return _ok({"finding_id": finding_id, "file": finding["file"], "content": content})
+
+
 def _reopen_dependents(pr_id, changed_finding_id, action, actor, now):
     """Reopen everything whose state rested on this fix, after it was edited or
     rejected.
@@ -298,16 +394,20 @@ def _reopen_dependents(pr_id, changed_finding_id, action, actor, now):
     Two relationships qualify, and they reopen differently:
 
     - A fix drafted on top of this one (this id in its applies_after) goes to
-      needs-human-only with stale_reason set, so the dashboard can say *why*
-      a fix it previously showed as resolved is open again. Its self-check ran
-      against a base that has since changed or will never land, so it no
-      longer evidences anything, whatever it concluded at the time.
+      mapped with stale_reason set, so the dashboard can say *why* a fix it
+      previously showed as resolved is open again. Its self-check ran against
+      a base that has since changed or will never land, so it no longer
+      evidences anything, whatever it concluded at the time. mapped rather
+      than needs-human-only because there is nothing for a human to do with
+      it: approve and edit are blocked on it (§3), and only a redraft against
+      the accepted base can fix that. mapped is what remediation-agent picks
+      up, and _chain_root now starts that redraft from the last accepted fix.
     - A finding this fix superseded (superseded_by == this id) goes to mapped
       and loses superseded_by. It never had a fix of its own -- this fix
       cleared its rule as a side effect, and after an edit that may no longer
-      be so; after a rejection it certainly is not. mapped is what
-      remediation-agent picks up, so the next run drafts it a fix for the
-      first time. No stale_reason: there is no proposed_fix to put it on.
+      be so; after a rejection it certainly is not. The next run drafts it a
+      fix for the first time. No stale_reason: there is no proposed_fix to
+      put it on.
 
     Every reopen writes a ReviewEvent with actor "system". That event is the
     point. A machine is reopening a decision a human recorded, and an audit
@@ -372,7 +472,7 @@ def _reopen_dependents(pr_id, changed_finding_id, action, actor, now):
             ),
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
-                ":status": "needs-human-only",
+                ":status": "mapped",
                 ":reason": because,
                 ":now": now,
             },

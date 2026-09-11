@@ -33,9 +33,15 @@ def _body(response):
     return json.loads(response["body"])
 
 
+# What the fix in FINDING was drafted against: its diff is "-old / +new", so
+# the pristine file is "old" and the agent's corrected file is "new".
+BASE_CONTENT = "old\n"
+
+
 @pytest.fixture
 def mock_table():
-    with patch.object(handler, "dynamodb") as mock_dynamodb:
+    with patch.object(handler, "dynamodb") as mock_dynamodb, \
+            patch.object(handler, "s3") as mock_s3:
         table = MagicMock()
         # A real empty page, not a bare MagicMock. _query_all pages until
         # LastEvaluatedKey is falsy, and every attribute of a MagicMock is
@@ -44,7 +50,16 @@ def mock_table():
         # care about query results override this.
         table.query.return_value = {"Items": []}
         mock_dynamodb.Table.return_value = table
+        # An edit reads the fix's base from S3 to compute the diff, and writes
+        # the edited content back. Reachable as handler.s3 inside a test.
+        mock_s3.get_object.return_value = {"Body": _body_of(BASE_CONTENT)}
+        mock_s3.exceptions.NoSuchKey = type("NoSuchKey", (Exception,), {})
         yield table
+
+
+def _body_of(text):
+    from types import SimpleNamespace
+    return SimpleNamespace(read=lambda: text.encode("utf-8"))
 
 
 FINDING = {
@@ -207,8 +222,11 @@ def test_approve_writes_an_audit_event_and_resolves_the_finding(mock_table):
     assert update_values[":status"] == "resolved"
 
 
-def test_reject_audits_the_decision_but_leaves_the_finding_open(mock_table):
-    """Rejecting a proposed fix doesn't make the vulnerability go away."""
+def test_reject_audits_the_decision_and_returns_the_finding_to_human_review(mock_table):
+    """Rejecting a proposed fix doesn't make the vulnerability go away -- but
+    it does take the fix off the table. Status used to be left wherever it
+    was, so a finding approved and later rejected still read "resolved" and
+    every consumer that needed the truth had to read the event log instead."""
     mock_table.get_item.return_value = {"Item": FINDING}
 
     response = handler.handler(
@@ -219,6 +237,31 @@ def test_reject_audits_the_decision_but_leaves_the_finding_open(mock_table):
         ),
         None,
     )
+
+    assert response["statusCode"] == 200
+    assert _body(response)["status"] == "needs-human-only"
+    mock_table.put_item.assert_called_once()
+    values = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert values[":status"] == "needs-human-only"
+
+
+def test_rejecting_an_approved_fix_retracts_resolved(mock_table):
+    """The case that used to lie. Approve, then reject: status must now say
+    needs-human-only, so it agrees with the event log for the first time."""
+    mock_table.get_item.return_value = {"Item": {**FINDING, "status": "resolved"}}
+
+    handler.handler(_review("rejected"), None)
+
+    values = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert values[":status"] == "needs-human-only"
+
+
+def test_rejecting_a_finding_with_no_fix_moves_nothing(mock_table):
+    """There was nothing proposed to refuse. The event is recorded; a mapped
+    finding stays mapped so remediation still picks it up."""
+    mock_table.get_item.return_value = {"Item": FINDING_NO_FIX}
+
+    response = handler.handler(_review("rejected"), None)
 
     assert response["statusCode"] == 200
     assert _body(response)["status"] is None
@@ -233,7 +276,7 @@ def test_edit_replaces_the_diff_preserves_the_agents_and_voids_the_self_check(mo
         _event(
             "POST /prs/{pr_id}/findings/{finding_id}/review",
             {"pr_id": "manual-1", "finding_id": "abc123"},
-            {"action": "edited", "edited_diff": "--- a/main.tf\n+reviewer edit\n"},
+            {"action": "edited", "edited_content": "reviewer edit\n"},
         ),
         None,
     )
@@ -242,8 +285,16 @@ def test_edit_replaces_the_diff_preserves_the_agents_and_voids_the_self_check(mo
     assert _body(response)["status"] == "resolved"
 
     written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":pf"]
-    assert written["diff"] == "--- a/main.tf\n+reviewer edit\n"
+    # The reviewer sent a file; the diff against the base is computed here,
+    # the same way remediation-agent computes the agent's.
+    assert "-old\n" in written["diff"] and "+reviewer edit\n" in written["diff"]
+    assert written["diff"].startswith("--- a/main.tf\n+++ b/main.tf\n")
     assert written["agent_diff"].endswith("-old\n+new\n")
+
+    # And the content is now the fix, in the place anything rooted on it reads.
+    put = handler.s3.put_object.call_args.kwargs
+    assert put["Key"] == "fixes/manual-1/abc123/main.tf"
+    assert put["Body"] == b"reviewer edit\n"
     # spec §6's guarantee applies just as much to a human edit: an unscanned
     # diff cannot carry a passing self-check.
     assert written["self_check_passed"] is False
@@ -251,7 +302,7 @@ def test_edit_replaces_the_diff_preserves_the_agents_and_voids_the_self_check(mo
     assert written["cleared"] is False
 
     event_item = mock_table.put_item.call_args.kwargs["Item"]
-    assert event_item["edited_diff"] == "--- a/main.tf\n+reviewer edit\n"
+    assert "+reviewer edit\n" in event_item["edited_diff"]
 
 
 def test_an_edit_preserves_what_the_fix_is_drafted_on(mock_table):
@@ -263,7 +314,7 @@ def test_an_edit_preserves_what_the_fix_is_drafted_on(mock_table):
     chain = [{"finding_id": "earlier1", "diff_sha256": PREREQ_HASH}]
     _chain(mock_table, _dependent(chain), PREREQ, [_event_item("approved", "2026-01-01")])
 
-    handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":pf"]
     assert written["applies_after"] == chain
@@ -291,7 +342,7 @@ def test_editing_an_unparseable_fix_clears_the_agents_parse_failure(mock_table):
         _event(
             "POST /prs/{pr_id}/findings/{finding_id}/review",
             {"pr_id": "manual-1", "finding_id": "abc123"},
-            {"action": "edited", "edited_diff": "--- a/main.tf\n+  }\n"},
+            {"action": "edited", "edited_content": "  }\n"},
         ),
         None,
     )
@@ -321,7 +372,7 @@ def test_second_edit_does_not_overwrite_the_agents_original_diff(mock_table):
         _event(
             "POST /prs/{pr_id}/findings/{finding_id}/review",
             {"pr_id": "manual-1", "finding_id": "abc123"},
-            {"action": "edited", "edited_diff": "second edit"},
+            {"action": "edited", "edited_content": "second edit\n"},
         ),
         None,
     )
@@ -341,16 +392,89 @@ def test_edit_without_a_diff_is_rejected(mock_table):
     mock_table.put_item.assert_not_called()
 
 
-def test_edited_diff_on_a_non_edit_action_is_rejected(mock_table):
+def test_edited_content_on_a_non_edit_action_is_rejected(mock_table):
     response = handler.handler(
         _event("POST /prs/{pr_id}/findings/{finding_id}/review",
                {"pr_id": "manual-1", "finding_id": "abc123"},
-               {"action": "approved", "edited_diff": "sneaky"}),
+               {"action": "approved", "edited_content": "sneaky\n"}),
         None,
     )
 
     assert response["statusCode"] == 400
     mock_table.put_item.assert_not_called()
+
+
+def test_edited_diff_is_refused_outright(mock_table):
+    """Not deprecated, refused. A reviewer-authored diff was never validated
+    against anything; the contract is the corrected file, and this side
+    computes the diff."""
+    response = handler.handler(_review("edited", edited_diff="--- a/main.tf\n+x\n"), None)
+
+    assert response["statusCode"] == 400
+    assert "edited_content" in _body(response)["error"]
+    mock_table.put_item.assert_not_called()
+
+
+def test_an_edit_that_changes_nothing_is_refused(mock_table):
+    """Identical to the base means no diff, and a fix with no diff is not a
+    fix. Nothing is written, including to S3."""
+    mock_table.get_item.return_value = {"Item": FINDING}
+
+    response = handler.handler(_review("edited", edited_content=BASE_CONTENT), None)
+
+    assert response["statusCode"] == 400
+    mock_table.put_item.assert_not_called()
+    handler.s3.put_object.assert_not_called()
+
+
+def test_an_edit_on_a_chained_fix_diffs_against_its_prerequisites_output(mock_table):
+    """The base for a fix with prerequisites is the last prerequisite's
+    corrected file, not the pristine snapshot -- applies_after is cumulative,
+    so that one file already has every earlier fix applied."""
+    # A satisfied prerequisite, so the edit is not blocked and reaches the diff.
+    _chain(mock_table, _dependent(SATISFIED), PREREQ, [_event_item("approved", "2026-01-01")])
+    handler.s3.get_object.return_value = {"Body": _body_of("after earlier1\n")}
+
+    response = handler.handler(_review("edited", edited_content="after earlier1\nplus mine\n"), None)
+    assert response["statusCode"] == 200, _body(response)
+
+    read_key = handler.s3.get_object.call_args.kwargs["Key"]
+    assert read_key == "fixes/manual-1/earlier1/main.tf"
+    written = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"][":pf"]
+    assert "+plus mine\n" in written["diff"]
+    # Purely additive against that base: nothing the prerequisite wrote is
+    # re-proposed or removed, which is what "the right base" looks like.
+    removed = [l for l in written["diff"].splitlines()
+               if l.startswith("-") and not l.startswith("---")]
+    assert removed == []
+
+
+def test_get_content_returns_the_fixes_corrected_file(mock_table):
+    mock_table.get_item.return_value = {"Item": FINDING}
+    handler.s3.get_object.return_value = {"Body": _body_of("new\n")}
+
+    response = handler.handler(
+        _event("GET /prs/{pr_id}/findings/{finding_id}/content",
+               {"pr_id": "manual-1", "finding_id": "abc123"}),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert _body(response) == {"finding_id": "abc123", "file": "main.tf", "content": "new\n"}
+    assert handler.s3.get_object.call_args.kwargs["Key"] == "fixes/manual-1/abc123/main.tf"
+
+
+def test_get_content_404s_when_the_fix_has_no_stored_file(mock_table):
+    mock_table.get_item.return_value = {"Item": FINDING}
+    handler.s3.get_object.side_effect = handler.s3.exceptions.NoSuchKey()
+
+    response = handler.handler(
+        _event("GET /prs/{pr_id}/findings/{finding_id}/content",
+               {"pr_id": "manual-1", "finding_id": "abc123"}),
+        None,
+    )
+
+    assert response["statusCode"] == 404
 
 
 @pytest.mark.parametrize("action", ["approved", "edited"])
@@ -359,7 +483,7 @@ def test_approve_or_edit_without_a_proposed_fix_is_a_conflict(mock_table, action
 
     body = {"action": action}
     if action == "edited":
-        body["edited_diff"] = "would-be edit"
+        body["edited_content"] = "would-be edit\n"
 
     response = handler.handler(
         _event("POST /prs/{pr_id}/findings/{finding_id}/review",
@@ -380,7 +504,7 @@ def test_self_check_passed_in_the_request_body_is_ignored(mock_table):
         _event(
             "POST /prs/{pr_id}/findings/{finding_id}/review",
             {"pr_id": "manual-1", "finding_id": "abc123"},
-            {"action": "edited", "edited_diff": "x", "self_check_passed": True},
+            {"action": "edited", "edited_content": "x\n", "self_check_passed": True},
         ),
         None,
     )
@@ -586,8 +710,9 @@ def test_reject_is_never_blocked_by_an_unmet_prerequisite(mock_table):
 
     assert response["statusCode"] == 200
     mock_table.put_item.assert_called_once()
-    # Rejection still leaves status alone.
-    mock_table.update_item.assert_not_called()
+    # Not blocked, and the fix is off the table.
+    values = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert values[":status"] == "needs-human-only"
 
 
 def test_edit_is_blocked_on_the_same_terms_as_approve(mock_table):
@@ -596,7 +721,7 @@ def test_edit_is_blocked_on_the_same_terms_as_approve(mock_table):
     rejects it and lets a re-run redraft it."""
     _chain(mock_table, _dependent(SATISFIED), PREREQ, [_event_item("rejected", "2026-01-01")])
 
-    response = handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     assert response["statusCode"] == 409
     assert _unmet(response) == [{"finding_id": "earlier1", "reason": "rejected"}]
@@ -685,7 +810,7 @@ def test_editing_a_fix_reopens_the_dependents_drafted_on_it(mock_table):
     mock_table.get_item.return_value = {"Item": FINDING}
     mock_table.query.return_value = {"Items": [FINDING, DEPENDENT]}
 
-    response = handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     assert response["statusCode"] == 200
     assert _body(response)["reopened_dependents"] == ["dependent1"]
@@ -693,7 +818,9 @@ def test_editing_a_fix_reopens_the_dependents_drafted_on_it(mock_table):
     reopened = _updates_for(mock_table, "dependent1")
     assert len(reopened) == 1
     values = reopened[0].kwargs["ExpressionAttributeValues"]
-    assert values[":status"] == "needs-human-only"
+    # mapped, not needs-human-only: nothing a human can do with it until it is
+    # redrafted, and mapped is what the redraft picks up.
+    assert values[":status"] == "mapped"
     assert "abc123" in values[":reason"]
 
     # A machine reopening a human's decision has to be on the record.
@@ -719,7 +846,7 @@ def test_rejecting_a_fix_reopens_the_dependents_drafted_on_it(mock_table):
     assert _body(response)["reopened_dependents"] == ["dependent1"]
 
     values = _updates_for(mock_table, "dependent1")[0].kwargs["ExpressionAttributeValues"]
-    assert values[":status"] == "needs-human-only"
+    assert values[":status"] == "mapped"
     assert "rejected" in values[":reason"]
     # The remedy differs from the edit case and the reason has to say so.
     assert "never landing" in values[":reason"]
@@ -744,7 +871,7 @@ SUPERSEDED = {
 
 
 @pytest.mark.parametrize("action,kwargs", [
-    ("edited", {"edited_diff": "reviewer version"}),
+    ("edited", {"edited_content": "reviewer version\n"}),
     ("rejected", {}),
 ])
 def test_changing_a_fix_returns_the_findings_it_superseded_to_mapped(mock_table, action, kwargs):
@@ -816,7 +943,7 @@ def test_a_finding_with_no_dependents_is_untouched_by_an_edit(mock_table):
     mock_table.get_item.return_value = {"Item": FINDING}
     mock_table.query.return_value = {"Items": [FINDING, unrelated]}
 
-    response = handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     assert _body(response)["reopened_dependents"] == []
     assert _updates_for(mock_table, "other") == []
@@ -853,7 +980,7 @@ def test_the_cascade_skips_the_finding_being_edited(mock_table):
         {"Items": [self_referential]},
     ]
 
-    response = handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     assert _body(response)["reopened_dependents"] == []
 
@@ -865,7 +992,7 @@ def test_a_cascade_event_cannot_collide_with_the_edit_that_caused_it(mock_table)
     mock_table.get_item.return_value = {"Item": FINDING}
     mock_table.query.return_value = {"Items": [DEPENDENT]}
 
-    handler.handler(_review("edited", edited_diff="reviewer version"), None)
+    handler.handler(_review("edited", edited_content="reviewer version\n"), None)
 
     sort_keys = [call.kwargs["Item"]["sk"] for call in mock_table.put_item.call_args_list]
     assert len(sort_keys) == len(set(sort_keys))

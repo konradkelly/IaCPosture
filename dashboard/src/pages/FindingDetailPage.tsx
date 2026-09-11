@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   ApiClientError,
   getFinding,
+  getFixContent,
   listEvents,
   listFindings,
   postReview,
@@ -89,13 +90,28 @@ export function FindingDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [showAgentDiff, setShowAgentDiff] = useState(false)
   const [unmet, setUnmet] = useState<UnmetPrerequisite[]>([])
+  // The corrected file, for the edit textarea. undefined until fetched and
+  // when the fix has none stored; the edit button hides on undefined.
+  const [fixContent, setFixContent] = useState<string | undefined>(undefined)
 
   const loadFinding = useCallback(async () => {
     if (!prId || !findingId) return
     setLoading(true)
     setError(null)
     try {
-      setFinding(await getFinding(prId, findingId))
+      const loaded = await getFinding(prId, findingId)
+      setFinding(loaded)
+      // Separate call, separate failure: a finding whose content is missing
+      // is still reviewable (approve, reject), just not editable.
+      if (loaded.proposed_fix?.diff) {
+        try {
+          setFixContent((await getFixContent(prId, findingId)).content)
+        } catch {
+          setFixContent(undefined)
+        }
+      } else {
+        setFixContent(undefined)
+      }
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : 'Failed to load finding')
     } finally {
@@ -149,7 +165,7 @@ export function FindingDetailPage() {
   async function handleReview(payload: {
     action: 'approved' | 'edited' | 'rejected'
     notes: string
-    edited_diff?: string
+    edited_content?: string
   }) {
     if (!prId || !findingId) return
     await postReview(prId, findingId, payload)
@@ -470,7 +486,7 @@ export function FindingDetailPage() {
                     .join(', ')}. Accepting it would record a decision that cannot be carried out, so approve and edit are held until that is settled. You can still reject it.`
                 : undefined
           }
-          currentDiff={finding.proposed_fix?.diff}
+          currentContent={fixContent}
           onSubmit={handleReview}
         />
       )}

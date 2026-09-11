@@ -41,7 +41,7 @@ computed one always will"). The same is true of reviewers.
 
 The textarea is prefilled with the fix's **corrected file** instead. Every
 scanner-verified fix already has one in S3: `_upload_scratch_file` writes it
-to `scans/self-checks/<pr_id>/<finding_id>/<file>` for the self-check. The
+to `fixes/<pr_id>/<finding_id>/<file>` for the self-check. The
 reviewer submits `edited_content`; review-api computes the diff with
 `difflib.unified_diff` against the fix's base, exactly as remediation-agent
 does, and stores both. No diff application anywhere in the system.
@@ -55,10 +55,15 @@ review-api writes `edited_content` to the fix's scratch key, replacing the
 agent's version. From then on the fix's stored content *is* its edited
 content, and anything rooted on the fix reads that.
 
-`scans/` expires at 90 days. Content that later chains will be rooted on
-cannot expire, so the lifecycle rule stops covering `scans/self-checks/`.
-Snapshots under `scans/<pr_id>/` still expire; a self-check output whose
-snapshot is gone is orphaned but harmless.
+`scans/` expires at 90 days, and content that later chains will be rooted
+on cannot. The first draft of this spec said the lifecycle rule would stop
+covering `scans/self-checks/`; S3 lifecycle rules cannot exempt a sub-prefix
+from a prefix rule, so instead fix content moved out from under `scans/`
+entirely, to `fixes/<pr_id>/<finding_id>/<file>`, which no expiry rule
+touches. That is a key change in remediation-agent and review-api and an IAM
+change in all three Lambda roles (the scanner reads it for self-checks).
+Snapshots under `scans/<pr_id>/` still expire; a fix whose snapshot is gone
+is orphaned but harmless.
 
 ### 2.3 remediation-agent roots a chain at the last accepted fix
 
@@ -100,7 +105,7 @@ There are none in the live table today.
 FindingRecord, no new fields. `proposed_fix.diff` is the reviewer's diff after
 an edit; `agent_diff` preserves the original as it already does.
 
-S3: `scans/self-checks/<pr_id>/<finding_id>/<file>` becomes load-bearing —
+S3: `fixes/<pr_id>/<finding_id>/<file>` (previously `scans/self-checks/…`) becomes load-bearing —
 the accepted content of a fix, agent-drafted or reviewer-edited.
 
 ## 4. API contract
@@ -126,9 +131,10 @@ current corrected content, for the dashboard to prefill. Reading it from S3
 on every detail-page load is fine; the alternative — storing the whole file
 in DynamoDB — puts a 400KB item ceiling under a Terraform file.
 
-IAM: review-api gains `s3:GetObject` on `scans/*` and `s3:PutObject` on
-`scans/self-checks/*`. Nothing narrower is possible for the read (the
-pristine snapshot is under `scans/<pr_id>/`), and nothing wider is needed.
+IAM: review-api gains `s3:GetObject` on `scans/*` and `fixes/*` and
+`s3:PutObject` on `fixes/*`. The read cannot be narrower — the pristine
+snapshot is under `scans/<pr_id>/` and a prerequisite's content under
+`fixes/` — and nothing wider is needed.
 
 ## 5. Dashboard
 
@@ -185,6 +191,12 @@ remediation-agent:
 dashboard: type check covers the contract change.
 
 ## 8. Order of work
+
+*All five built in one pass on 2026-09-11; 113 tests across the three suites.
+Two deviations from the plan above: §2.2's lifecycle exemption became a prefix
+move (see there), and reopened chain dependents go to `mapped` rather than
+`needs-human-only`, since there is nothing a human can do with one until it
+is redrafted and `mapped` is what the redraft picks up.*
 
 1. §2.4 first, on its own — it is one line in review-api and simplifies
    everything after it.

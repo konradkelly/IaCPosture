@@ -30,6 +30,9 @@ resource "aws_lambda_function" "review_api" {
   environment {
     variables = {
       DYNAMODB_TABLE = aws_dynamodb_table.findings.name
+      # A reviewer's edit is the corrected file, and the diff is computed here
+      # against the fix's base -- both live in the artifacts bucket.
+      ARTIFACTS_BUCKET = aws_s3_bucket.artifacts.bucket
     }
   }
 

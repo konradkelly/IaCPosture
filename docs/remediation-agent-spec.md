@@ -69,13 +69,16 @@ Matches the convention used by the other two Lambdas:
    risks not applying cleanly (wrong line numbers/context); a
    mechanically computed one always will.
 5. Upload the corrected content to a scratch location:
-   `scans/<pr_id>/self-check-<finding_id>/main.tf` (must stay under the
+   `fixes/<pr_id>/<finding_id>/main.tf` — not under `scans/`, which expires,
+   because this file is later read back as the base for every fix drafted on
+   top of it and overwritten by a reviewer's edit (originally specified as
+   `scans/<pr_id>/self-check-<finding_id>/main.tf`, must stay under the
    `scans/` prefix — that's what's IAM-permitted, see below).
 6. Invoke `terraform-scanner` synchronously (`lambda:InvokeFunction`) with:
    ```json
    {
      "pr_id": "<pr_id>-self-check-<finding_id>",
-     "s3_prefix": "scans/<pr_id>/self-check-<finding_id>/",
+     "s3_prefix": "fixes/<pr_id>/<finding_id>/",
      "iac_type": "terraform",
      "persist": false
    }

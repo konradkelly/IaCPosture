@@ -38,9 +38,13 @@ data "aws_iam_policy_document" "terraform_scanner" {
   }
 
   statement {
-    sid       = "ScanArtifactsReadWrite"
-    actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.artifacts.arn}/scans/*"]
+    sid     = "ScanArtifactsReadWrite"
+    actions = ["s3:GetObject", "s3:PutObject"]
+    # fixes/ because a self-check scans a fix's corrected file from there.
+    resources = [
+      "${aws_s3_bucket.artifacts.arn}/scans/*",
+      "${aws_s3_bucket.artifacts.arn}/fixes/*",
+    ]
   }
 
   # ListObjectsV2 (used to enumerate a scan's .tf files by prefix) is a
@@ -54,7 +58,7 @@ data "aws_iam_policy_document" "terraform_scanner" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["scans/*"]
+      values   = ["scans/*", "fixes/*"]
     }
   }
 
@@ -147,9 +151,15 @@ data "aws_iam_policy_document" "remediation_agent" {
   }
 
   statement {
-    sid       = "PatchedFileScratchSpace"
-    actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.artifacts.arn}/scans/*"]
+    sid     = "SnapshotsAndFixContent"
+    actions = ["s3:GetObject", "s3:PutObject"]
+    # scans/ for the pristine snapshot a file's first fix is drafted against;
+    # fixes/ to write each fix's corrected file and to read the last accepted
+    # one back as the base for the next chain.
+    resources = [
+      "${aws_s3_bucket.artifacts.arn}/scans/*",
+      "${aws_s3_bucket.artifacts.arn}/fixes/*",
+    ]
   }
 }
 
@@ -178,6 +188,25 @@ data "aws_iam_policy_document" "review_api" {
     sid       = "FindingsAndAuditLogReadWrite"
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query"]
     resources = [aws_dynamodb_table.findings.arn]
+  }
+
+  # An edit is diffed against the fix's base: the PR's pristine snapshot
+  # (scans/<pr_id>/) for a file's first fix, otherwise a prerequisite's
+  # corrected file (fixes/). The write is only ever a fix's own corrected
+  # file. docs/reviewer-edit-spec.md §4.
+  statement {
+    sid     = "ReadFixBases"
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.artifacts.arn}/scans/*",
+      "${aws_s3_bucket.artifacts.arn}/fixes/*",
+    ]
+  }
+
+  statement {
+    sid       = "WriteEditedFixContent"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.artifacts.arn}/fixes/*"]
   }
 }
 
