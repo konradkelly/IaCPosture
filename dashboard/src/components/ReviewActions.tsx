@@ -13,34 +13,37 @@ interface ReviewActionsProps {
    *  disabling it would trap them. Notes stay editable for the same reason --
    *  a rejection is exactly the decision that wants explaining. */
   allowReject?: boolean
-  /** The proposed diff to prefill the edit textarea with. Approve-with-edits
-   *  is hidden entirely when this is absent -- there's nothing to edit. */
-  currentDiff?: string
-  onSubmit: (payload: { action: ReviewAction; notes: string; edited_diff?: string }) => Promise<void>
+  /** The fix's corrected file, to prefill the edit textarea with. The
+   *  reviewer edits the file, not the diff: the API computes the diff against
+   *  the fix's base, so what they submit is always something that applies.
+   *  Approve-with-edits is hidden entirely when this is absent -- there's
+   *  nothing to edit. */
+  currentContent?: string
+  onSubmit: (payload: { action: ReviewAction; notes: string; edited_content?: string }) => Promise<void>
 }
 
 export function ReviewActions({
   disabled,
   disabledReason,
   allowReject,
-  currentDiff,
+  currentContent,
   onSubmit,
 }: ReviewActionsProps) {
   const { actor } = useAuth()
   const [notes, setNotes] = useState('')
   const [editing, setEditing] = useState(false)
-  const [editedDiff, setEditedDiff] = useState(currentDiff ?? '')
+  const [editedContent, setEditedContent] = useState(currentContent ?? '')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
-  async function handleAction(action: ReviewAction, editedDiffValue?: string) {
+  async function handleAction(action: ReviewAction, editedContentValue?: string) {
     setSubmitting(true)
     setError(null)
     setSuccess(null)
 
     try {
-      await onSubmit({ action, notes: notes.trim(), edited_diff: editedDiffValue })
+      await onSubmit({ action, notes: notes.trim(), edited_content: editedContentValue })
       setSuccess(
         action === 'rejected'
           ? 'Rejection recorded. Finding remains open.'
@@ -56,7 +59,7 @@ export function ReviewActions({
   }
 
   function startEditing() {
-    setEditedDiff(currentDiff ?? '')
+    setEditedContent(currentContent ?? '')
     setEditing(true)
   }
 
@@ -86,18 +89,19 @@ export function ReviewActions({
 
       {editing && (
         <div className="form-field">
-          <label htmlFor="edited-diff">Edited diff</label>
+          <label htmlFor="edited-content">Edited file</label>
           <textarea
-            id="edited-diff"
+            id="edited-content"
             className="review-actions__diff-editor"
-            value={editedDiff}
-            onChange={(e) => setEditedDiff(e.target.value)}
-            rows={16}
+            value={editedContent}
+            onChange={(e) => setEditedContent(e.target.value)}
+            rows={24}
             spellCheck={false}
             disabled={submitting}
           />
           <p className="muted">
-            Saving clears the self-check: this diff has not been run through the scanner.
+            This is the whole corrected file. The diff is computed from it on save, and
+            saving clears the self-check: this version has not been run through the scanner.
           </p>
         </div>
       )}
@@ -113,7 +117,7 @@ export function ReviewActions({
             >
               Approve
             </button>
-            {currentDiff && (
+            {currentContent !== undefined && (
               <button
                 type="button"
                 className="btn btn--edit"
@@ -137,8 +141,8 @@ export function ReviewActions({
             <button
               type="button"
               className="btn btn--edit"
-              disabled={submitting || editedDiff.trim() === ''}
-              onClick={() => handleAction('edited', editedDiff)}
+              disabled={submitting || editedContent.trim() === '' || editedContent === currentContent}
+              onClick={() => handleAction('edited', editedContent)}
             >
               Save edited fix
             </button>

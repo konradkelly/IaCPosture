@@ -118,21 +118,13 @@ def handler(event, context):
 
     for file_path, findings in _group_by_file(mapped_findings):
         try:
-            base_content = _fetch_original_content(pr_id, file_path)
+            base_content, baseline_counts, applies_after = _chain_root(pr_id, file_path)
         except Exception:
-            # Nothing in this file can be remediated without its content, and
-            # the failure is the file's, not any one finding's.
-            logger.exception("could not read the snapshot for %s", file_path)
+            # Nothing in this file can be remediated without its base, and the
+            # failure is the file's, not any one finding's.
+            logger.exception("could not establish the chain root for %s", file_path)
             error_count += len(findings)
             continue
-
-        # The finding set of base_content, which starts as the pristine file
-        # and is replaced below by each accepted fix's own rescan. Comparing a
-        # later fix against the *original* baseline would let it silently undo
-        # an earlier one: a rule an earlier fix cleared is still present in the
-        # original counts, so its return would not register as a new finding.
-        baseline_counts = _query_baseline_counts(pr_id, file_path)
-        applies_after = []
         # (source, rule_id) -> the fix that took it to zero in this run. Rules
         # overlap between and within the two scanners, so one fix routinely
         # clears more than its own finding: on demo-1, CKV_AWS_145 wants KMS
@@ -342,6 +334,76 @@ def _query_all(table, **kwargs):
         kwargs["ExclusiveStartKey"] = last_key
 
 
+def _chain_root(pr_id, file_path):
+    """Where this file's chain starts: (content, finding counts, applies_after).
+
+    The pristine snapshot, unless a fix on this file has already been accepted
+    -- then the chain starts from the *last* accepted fix's corrected file, so
+    everything drafted now is drafted on top of what a reviewer has already
+    said yes to. That is what makes a reopened dependent recoverable: after a
+    reviewer edits f1, f2 goes back to mapped and is redrafted here against
+    the edited f1, not against a snapshot that never had f1 in it.
+    docs/reviewer-edit-spec.md §2.3.
+
+    Accepted means status "resolved", which is trustworthy now that a
+    rejection retracts it (review-api). Among several resolved fixes on one
+    file the last is the one with the longest chain: applies_after is
+    cumulative, so the longest one has every other applied already.
+
+    The counts for the root are the finding set of its content. For the
+    snapshot that is the original scan, already in the table. For an accepted
+    fix it is a rescan: the fix's own self-check counts are stale if a
+    reviewer edited it, and the difference is exactly the case this exists
+    for, so it is not worth the two code paths to skip the invoke when it
+    would be safe.
+    """
+    on_file = _query_findings_on_file(pr_id, file_path)
+    accepted = [
+        f for f in on_file
+        if f.get("status") == "resolved" and (f.get("proposed_fix") or {}).get("diff")
+    ]
+    if not accepted:
+        # The original scan's counts, across every status. Counts rather than
+        # a set: one file often carries several instances of the same rule
+        # (three open-ingress rules in one security group, say), and the
+        # self-check has to distinguish "one of them was fixed" from "none".
+        counts = collections.Counter((f["source"], f["rule_id"]) for f in on_file)
+        return _fetch_original_content(pr_id, file_path), counts, []
+
+    root = max(accepted, key=lambda f: len(f["proposed_fix"].get("applies_after") or []))
+    root_id = root["finding_id"]
+    logger.info("chain for %s roots at accepted fix %s", file_path, root_id)
+
+    key = f"{_self_check_prefix(pr_id, root_id)}{file_path}"
+    content = s3.get_object(Bucket=ARTIFACTS_BUCKET, Key=key)["Body"].read().decode("utf-8")
+
+    rescan_findings, scan_errors = _invoke_self_check(pr_id, root_id)
+    if scan_errors:
+        # The accepted content does not parse. Most likely a reviewer's edit
+        # broke it. Nothing can be drafted on a base the scanner cannot read.
+        raise RuntimeError(f"accepted fix {root_id} does not parse: {scan_errors}")
+    counts = collections.Counter((f["source"], f["rule_id"]) for f in rescan_findings)
+
+    chain = list(root["proposed_fix"].get("applies_after") or [])
+    chain.append({"finding_id": root_id, "diff_sha256": _diff_sha256(root["proposed_fix"]["diff"])})
+    return content, counts, chain
+
+
+def _query_findings_on_file(pr_id, file_path):
+    table = dynamodb.Table(DYNAMODB_TABLE)
+    return _query_all(
+        table,
+        KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
+        FilterExpression="#file = :file",
+        ExpressionAttributeNames={"#file": "file"},
+        ExpressionAttributeValues={
+            ":pk": f"PR#{pr_id}",
+            ":sk_prefix": "FINDING#",
+            ":file": file_path,
+        },
+    )
+
+
 def _query_mapped_findings(pr_id):
     table = dynamodb.Table(DYNAMODB_TABLE)
     return _query_all(
@@ -355,28 +417,6 @@ def _query_mapped_findings(pr_id):
             ":status": "mapped",
         },
     )
-
-
-def _query_baseline_counts(pr_id, file_path):
-    """How many times each (source, rule_id) fires on file_path in the baseline
-    scan, across every status.
-
-    Counts rather than a set: one file often carries several instances of the
-    same rule (three open-ingress rules in one security group, say), and the
-    self-check has to distinguish "one of them was fixed" from "none were"."""
-    table = dynamodb.Table(DYNAMODB_TABLE)
-    items = _query_all(
-        table,
-        KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
-        FilterExpression="#file = :file",
-        ExpressionAttributeNames={"#file": "file"},
-        ExpressionAttributeValues={
-            ":pk": f"PR#{pr_id}",
-            ":sk_prefix": "FINDING#",
-            ":file": file_path,
-        },
-    )
-    return collections.Counter((item["source"], item["rule_id"]) for item in items)
 
 
 def _fetch_original_content(pr_id, file_path):
@@ -540,15 +580,18 @@ def _compute_diff(original_content, corrected_content, file_path):
 
 
 def _self_check_prefix(pr_id, finding_id):
-    """Scratch prefix for one finding's patched file.
+    """Where one fix's corrected file lives, and the prefix the self-check
+    scans.
 
-    A sibling of the PR's snapshot, not the `scans/<pr_id>/self-check-<id>/`
-    the build brief specifies: the scanner lists `scans/<pr_id>/` recursively
-    and takes every .tf under it, so nesting scratch copies there would make a
-    later scan read this agent's own patched files as source. Still under
-    `scans/*`, which is what the execution role grants.
+    Not under `scans/<pr_id>/`: the scanner lists that recursively and takes
+    every .tf under it, so a copy there would be read as source by the next
+    scan. Not under `scans/` at all any more: that prefix expires at 90 days,
+    an S3 lifecycle rule cannot exempt a sub-prefix, and this file is no
+    longer scratch -- it is the fix's content, read back as the base for every
+    fix drafted on top of it and overwritten by a reviewer's edit. review-api's
+    _content_key must build the identical key.
     """
-    return f"scans/self-checks/{pr_id}/{finding_id}/"
+    return f"fixes/{pr_id}/{finding_id}/"
 
 
 def _upload_scratch_file(pr_id, finding_id, file_path, content):

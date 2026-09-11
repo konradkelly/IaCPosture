@@ -1,5 +1,10 @@
-# Single bucket, two prefixes:
-#   scans/  - raw Terraform snapshots per scan run + scanner output artifacts (transient)
+# Single bucket, three prefixes:
+#   scans/  - raw Terraform snapshots per scan run (transient, expired below)
+#   fixes/  - each fix's corrected file: the agent's draft, overwritten by a
+#             reviewer's edit. Read back as the base for every fix drafted on
+#             top of it, so it must outlive the snapshot -- an S3 lifecycle
+#             rule cannot exempt a sub-prefix, which is why this is not under
+#             scans/. See docs/reviewer-edit-spec.md §2.2.
 #   corpus/ - versioned CIS/OWASP control text (long-lived, relies on bucket versioning)
 resource "aws_s3_bucket" "artifacts" {
   bucket = "${var.project}-${var.environment}-artifacts-${data.aws_caller_identity.current.account_id}"

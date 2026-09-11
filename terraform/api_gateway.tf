@@ -61,6 +61,7 @@ locals {
     "GET /prs/{pr_id}/findings",
     "GET /prs/{pr_id}/findings/{finding_id}",
     "GET /prs/{pr_id}/findings/{finding_id}/events",
+    "GET /prs/{pr_id}/findings/{finding_id}/content",
     "POST /prs/{pr_id}/findings/{finding_id}/review",
   ]
 }

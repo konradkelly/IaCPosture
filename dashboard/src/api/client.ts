@@ -66,6 +66,22 @@ export function getFinding(prId: string, findingId: string): Promise<Finding> {
   )
 }
 
+export interface FixContentResponse {
+  finding_id: string
+  file: string
+  content: string
+}
+
+/** The fix's corrected file, as it currently stands -- the agent's draft, or
+ *  the reviewer's edit if one has been made. What the edit textarea prefills
+ *  with. Read from S3 on each request rather than carried on the finding: a
+ *  module's main.tf can exceed a DynamoDB item. */
+export function getFixContent(prId: string, findingId: string): Promise<FixContentResponse> {
+  return request<FixContentResponse>(
+    `/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(findingId)}/content`,
+  )
+}
+
 export function listEvents(prId: string, findingId: string): Promise<EventsListResponse> {
   return request<EventsListResponse>(
     `/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(findingId)}/events`,
@@ -78,7 +94,11 @@ export function postReview(
   // No actor field: the API derives the reviewer's identity from the bearer
   // token (see review-api's _actor_from_claims), not from anything the client
   // sends. Passing one here would be silently ignored.
-  payload: { action: ReviewAction; notes?: string; edited_diff?: string },
+  // edited_content is the whole corrected file, not a diff. The API computes
+  // the diff against the fix's base, the same way remediation-agent computes
+  // the agent's, so a reviewer's edit is validated the same way an agent's is.
+  // A hand-authored diff would not be, and the API refuses one.
+  payload: { action: ReviewAction; notes?: string; edited_content?: string },
 ): Promise<ReviewResponse> {
   return request<ReviewResponse>(
     `/prs/${encodeURIComponent(prId)}/findings/${encodeURIComponent(findingId)}/review`,
