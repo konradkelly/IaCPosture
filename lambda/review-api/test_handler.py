@@ -904,6 +904,50 @@ def test_changing_a_fix_returns_the_findings_it_superseded_to_mapped(mock_table,
     assert "abc123" in system_events[0]["notes"]
 
 
+def test_reopening_a_chain_dependent_also_reopens_what_it_superseded(mock_table):
+    """f1 is edited; f2 (drafted on f1) is reopened for redrafting. s3 was
+    superseded by f2's *old* draft. The redraft is a new draft and the claim
+    that it clears s3 has to be re-earned, so s3 goes back to mapped too.
+    Observed live before this existed: s3 stayed superseded, pointing at a
+    diff that no longer existed."""
+    superseded_by_dependent = {
+        **SUPERSEDED,
+        "sk": "FINDING#shadowed2",
+        "finding_id": "shadowed2",
+        "superseded_by": "dependent1",
+    }
+    mock_table.get_item.return_value = {"Item": FINDING}
+    mock_table.query.return_value = {"Items": [FINDING, DEPENDENT, superseded_by_dependent]}
+
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
+
+    assert response["statusCode"] == 200
+    assert set(_body(response)["reopened_dependents"]) == {"dependent1", "shadowed2"}
+
+    update = _updates_for(mock_table, "shadowed2")[0].kwargs
+    assert update["ExpressionAttributeValues"][":status"] == "mapped"
+    assert "REMOVE superseded_by" in update["UpdateExpression"]
+
+    # The event names the fix that actually superseded it, not the one edited.
+    event = next(c.kwargs["Item"] for c in mock_table.put_item.call_args_list
+                 if c.kwargs["Item"].get("finding_id") == "shadowed2")
+    assert "dependent1" in event["notes"] and "redrafted" in event["notes"]
+
+
+def test_a_finding_superseded_by_an_unrelated_fix_is_not_reopened(mock_table):
+    """Only one hop: supersede is not transitive, and a finding superseded by
+    something outside the changed fix's chain has no reason to move."""
+    unrelated = {**SUPERSEDED, "sk": "FINDING#shadowed3", "finding_id": "shadowed3",
+                 "superseded_by": "someone-else"}
+    mock_table.get_item.return_value = {"Item": FINDING}
+    mock_table.query.return_value = {"Items": [FINDING, unrelated]}
+
+    response = handler.handler(_review("edited", edited_content="reviewer version\n"), None)
+
+    assert _body(response)["reopened_dependents"] == []
+    assert _updates_for(mock_table, "shadowed3") == []
+
+
 def test_approve_is_blocked_with_reason_reopened_not_rejected(mock_table):
     """A reopened prerequisite is the system's doing, and the remedy differs:
     a rejected one is dropped from the chain, a reopened one is waiting to be

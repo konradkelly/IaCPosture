@@ -164,7 +164,16 @@ untouched and landing — `_reopen_dependents` reads the PR partition
 | relationship | goes to | why that status |
 |---|---|---|
 | names this fix in `applies_after` | `mapped`, `proposed_fix.stale_reason` set | it has a proposal, drafted against a base that changed (edit) or is never landing (reject); it needs redrafting, and `mapped` is what the redraft picks up — `_chain_root` starts it from the last accepted fix (`docs/reviewer-edit-spec.md`) |
-| `superseded_by == this fix` | `mapped`, `superseded_by` removed | it never had a proposal — this fix cleared its rule as a side effect, and after an edit that may not hold; after a rejection it does not. `mapped` is what remediation-agent picks up, so the next run drafts it a fix for the first time |
+| `superseded_by == this fix`, **or `== any chain dependent being reopened`** | `mapped`, `superseded_by` removed | it never had a proposal — this fix cleared its rule as a side effect, and after an edit that may not hold; after a rejection it does not. `mapped` is what remediation-agent picks up, so the next run drafts it a fix for the first time |
+
+The second half of that row is one extra hop, not transitivity: a reopened
+chain dependent is about to be redrafted, and anything its *old* draft
+superseded has to re-earn that status against the new one. Supersede itself
+is not transitive (a superseded finding has no fix to supersede anything
+with), and `applies_after` is cumulative, so one hop reaches everything.
+Found live: `f2` was reopened and redrafted while a finding superseded by
+`f2`'s old draft stayed superseded, pointing at a diff that no longer
+existed.
 
 Every reopen writes a ReviewEvent with `actor: "system"`, `action: "reopened"`,
 and `sk` suffixed `#system` so it cannot collide with the human decision that
