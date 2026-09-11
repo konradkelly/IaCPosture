@@ -50,6 +50,20 @@ Built serverless on AWS — API Gateway, Lambda, SQS, DynamoDB, S3, EventBridge,
 
 Full technical spec (data model, agent JSON contracts, eval plan, build phases): [`docs/spec.md`](./docs/spec.md)
 
+## Running it
+
+Against the deployed dev stack, with AWS credentials and `terraform` on `PATH`:
+
+```bash
+python scripts/scan.py path/to/terraform          # upload, scan, map, then ask before remediating
+python scripts/scan.py path/to/terraform --yes    # don't ask
+python corpus/eval/run_eval.py                    # detection recall over the labelled cases
+```
+
+`scan.py` prints the dashboard URL for the run when it finishes. Remediation is
+the stage that costs model calls -- one per mapped finding -- which is why it
+asks first.
+
 ## Status
 
 🚧 Pre-build / architecture phase. v1 scope is Terraform-only (detect → map → propose fix → human review); Kubernetes/Helm scanning is planned for v2.
