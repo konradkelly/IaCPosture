@@ -4,8 +4,8 @@
   "expected": [
     {
       "source": "checkov",
-      "rule_id": "CKV_SECRET_6"
+      "rule_id": "CKV_SECRET_10"
     }
   ],
-  "note": "CKV_SECRET_* belongs to checkov's `secrets` framework, which the scanner does not enable (--framework terraform only). Expected to MISS until it does. Kept as a positive so the \u00a72 'hardcoded secrets' gap is measured, not assumed."
+  "note": "Relabelled 2026-09-12 from CKV_SECRET_6. Reading checkov's SECRET_TYPE_TO_ID: 6 is the Base64 High Entropy plugin, 10 is Secret Keyword, and `password = \"...\"` is a keyword match. Was a predicted miss while the scanner ran --framework terraform alone; the secrets framework is on now, so this is expected to HIT."
 }

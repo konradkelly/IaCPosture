@@ -12,7 +12,9 @@ result JSON by hand. This is the one command.
 
 Stages, each a synchronous Lambda invoke, each printed as it completes:
 
-  upload     every .tf under the directory -> s3://<bucket>/scans/<pr_id>/
+  upload     every .tf, .tf.json, .tfvars and .tfvars.json under the
+             directory -> s3://<bucket>/scans/<pr_id>/  (.tfvars is where
+             hardcoded secrets actually live, and where variables resolve)
   scan       terraform-scanner, persist=true -> raw findings in DynamoDB
   map        mapping-agent -> control citations, status "mapped"
   remediate  remediation-agent -> one model call per mapped finding, plus a
@@ -43,6 +45,10 @@ from botocore.config import Config
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
+# Must match terraform-scanner's SNAPSHOT_SUFFIXES: the scanner only downloads
+# what it recognises, so anything uploaded outside this set is ignored.
+SNAPSHOT_SUFFIXES = (".tf", ".tf.json", ".tfvars", ".tfvars.json")
+
 # remediation-agent may run for its full 900s. The read timeout has to
 # outlast it, and retries have to be OFF: a retried RequestResponse invoke of
 # a Lambda that is still running would start a second copy of the same
@@ -59,9 +65,12 @@ def tf_output(name):
 
 
 def collect_tf_files(root):
-    files = sorted(p for p in root.rglob("*.tf") if ".terraform" not in p.parts)
+    files = sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.name.endswith(SNAPSHOT_SUFFIXES) and ".terraform" not in p.parts
+    )
     if not files:
-        sys.exit(f"no .tf files under {root}")
+        sys.exit(f"no Terraform files under {root}")
     return files
 
 
