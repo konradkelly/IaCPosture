@@ -1,0 +1,11 @@
+{
+  "description": "RDS master password marked sensitive in main.tf, then hardcoded in terraform.tfvars",
+  "category": "hardcoded-secrets",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_SECRET_10"
+    }
+  ],
+  "note": "The realistic form of the hardcoded-secrets goal: main.tf is clean, the literal is in the .tfvars that was never in the snapshot until 2026-09-12. CKV_SECRET_10 is detect-secrets' Secret Keyword plugin, which matches `password = \"...\"` assignments; labelled from checkov's SECRET_TYPE_TO_ID and left to the run to confirm."
+}

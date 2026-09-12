@@ -1,0 +1,15 @@
+{
+  "description": "The s3-no-encryption case written as .tf.json instead of HCL",
+  "category": "missing-encryption",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_AWS_145"
+    },
+    {
+      "source": "tfsec",
+      "rule_id": "aws-s3-enable-bucket-encryption"
+    }
+  ],
+  "note": "Proves .tf.json is in the snapshot and both tools parse it. Same expected pair as s3-no-encryption; if this case misses while that one hits, the surface is the problem, not the rule."
+}

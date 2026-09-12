@@ -47,6 +47,9 @@ import boto3
 
 HERE = pathlib.Path(__file__).resolve().parent
 CASES = HERE / "cases"
+
+# Must match terraform-scanner's SNAPSHOT_SUFFIXES.
+SNAPSHOT_SUFFIXES = (".tf", ".tf.json", ".tfvars", ".tfvars.json")
 RULE_MAPPINGS = HERE.parent / "rule_mappings.json"
 
 
@@ -69,7 +72,12 @@ def load_cases():
     for d in sorted(p for p in CASES.iterdir() if p.is_dir()):
         expected = json.loads((d / "expected.json").read_text(encoding="utf-8"))
         cases[d.name] = {
-            "tf": (d / "main.tf").read_text(encoding="utf-8"),
+            # Every Terraform file in the case, not just main.tf: a case can
+            # be a .tf.json, or a .tf plus the .tfvars that holds the secret.
+            "files": {
+                p.name: p.read_text(encoding="utf-8")
+                for p in sorted(d.iterdir()) if p.name.endswith(SNAPSHOT_SUFFIXES)
+            },
             "category": expected["category"],
             "description": expected["description"],
             "expected": {(e["source"], e["rule_id"]) for e in expected["expected"]},
@@ -79,7 +87,8 @@ def load_cases():
 
 def upload(s3, bucket, prefix, cases):
     for name, c in cases.items():
-        s3.put_object(Bucket=bucket, Key=f"{prefix}{name}/main.tf", Body=c["tf"].encode("utf-8"))
+        for filename, content in c["files"].items():
+            s3.put_object(Bucket=bucket, Key=f"{prefix}{name}/{filename}", Body=content.encode("utf-8"))
 
 
 def scan(lam, function, prefix, run_id):

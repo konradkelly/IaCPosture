@@ -126,6 +126,77 @@ def test_a_scan_timeout_propagates(mock_run):
         handler._run_tfsec(WORK_DIR)
 
 
+# ---------- snapshot surface ----------
+
+@patch.object(handler, "s3")
+def test_snapshot_download_takes_every_terraform_file_type(mock_s3):
+    """Until this, only .tf came down. A hardcoded password lives in the
+    .tfvars that was never uploaded, and a .tf.json module was invisible."""
+    mock_s3.get_paginator.return_value.paginate.return_value = [{"Contents": [
+        {"Key": "scans/pr-1/main.tf"},
+        {"Key": "scans/pr-1/modules/vpc/main.tf.json"},
+        {"Key": "scans/pr-1/terraform.tfvars"},
+        {"Key": "scans/pr-1/prod.auto.tfvars.json"},
+        {"Key": "scans/pr-1/README.md"},
+        {"Key": "scans/pr-1/.terraform.lock.hcl"},
+    ]}]
+
+    with patch.object(handler.os, "makedirs"):
+        downloaded = handler._download_snapshot("bucket", "scans/pr-1/", "/tmp/x")
+
+    assert [pathlib_name(p) for p in downloaded] == [
+        "main.tf", "main.tf.json", "terraform.tfvars", "prod.auto.tfvars.json",
+    ]
+
+
+def pathlib_name(path):
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def test_checkov_reports_may_be_a_list_when_two_frameworks_fire():
+    """With `terraform,secrets`, checkov unwraps a lone report to a dict and
+    leaves several as a list. Every consumer has to accept both, or a scan
+    that finds a secret would drop every terraform finding alongside it."""
+    terraform = _checkov_report(failed_checks=[{
+        "check_id": "CKV_AWS_145", "file_path": "/main.tf",
+        "file_line_range": [1, 3], "severity": None,
+    }])
+    secrets = {
+        "check_type": "secrets",
+        "results": {"failed_checks": [{
+            "check_id": "CKV_SECRET_10", "file_path": "/terraform.tfvars",
+            "file_line_range": [2, 2], "severity": None,
+        }], "parsing_errors": []},
+        "summary": {},
+    }
+
+    findings = handler._normalize_checkov([terraform, secrets], "pr-1")
+
+    assert [(f["rule_id"], f["file"]) for f in findings] == [
+        ("CKV_AWS_145", "main.tf"), ("CKV_SECRET_10", "terraform.tfvars"),
+    ]
+    # And the dict shape still works exactly as before.
+    assert len(handler._normalize_checkov(terraform, "pr-1")) == 1
+
+
+def test_parse_errors_are_collected_across_every_report():
+    reports = [
+        _checkov_report(parsing_errors=[f"{WORK_DIR}/a.tf"]),
+        {"check_type": "secrets", "results": {"parsing_errors": [f"{WORK_DIR}/b.tfvars"]}},
+    ]
+    assert handler._checkov_parse_errors(reports, WORK_DIR) == ["a.tf", "b.tfvars"]
+
+
+@patch.object(handler.subprocess, "run")
+def test_checkov_runs_the_secrets_framework_too(mock_run):
+    mock_run.return_value = _proc(stdout=json.dumps(_checkov_report()))
+
+    handler._run_checkov(WORK_DIR)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[argv.index("--framework") + 1] == "terraform,secrets"
+
+
 # ---------- parse errors ----------
 
 def test_parse_errors_are_reported_relative_to_the_work_dir():

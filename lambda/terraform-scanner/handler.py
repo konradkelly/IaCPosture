@@ -8,7 +8,7 @@ call path passes persist=false and just reads the returned findings.
 Event shape:
 {
   "pr_id": "manual-1",
-  "s3_prefix": "scans/manual-1/",   # directory of .tf files under ARTIFACTS_BUCKET
+  "s3_prefix": "scans/manual-1/",   # Terraform snapshot under ARTIFACTS_BUCKET (see SNAPSHOT_SUFFIXES)
   "iac_type": "terraform",
   "persist": true                    # optional, default true
 }
@@ -57,6 +57,20 @@ METRIC_NAMESPACE = "IaCPosture"
 # framework loading, roughly halves this) instead of shelling out per-invocation.
 SCAN_TIMEOUT_SECONDS = 240
 
+# What a snapshot is. Both tools parse .tf.json natively, and both read
+# .tfvars: tfsec auto-loads terraform.tfvars and *.auto.tfvars to resolve
+# variables, and checkov's secrets framework scans them for literals. Until
+# 2026-09-12 this was .tf alone, which is exactly where a hardcoded password
+# is *not* -- it is in the .tfvars that was never uploaded. scripts/scan.py
+# and corpus/eval/run_eval.py upload the same set; keep the three aligned.
+SNAPSHOT_SUFFIXES = (".tf", ".tf.json", ".tfvars", ".tfvars.json")
+
+# checkov frameworks. `secrets` is detect-secrets over every file in the
+# snapshot: AWS key patterns, `password = "..."` assignments, high-entropy
+# strings. It was off, so spec §2's "hardcoded secrets" goal measured 75% on
+# the eval corpus with the miss being a literal RDS master password.
+CHECKOV_FRAMEWORKS = "terraform,secrets"
+
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 
@@ -98,7 +112,7 @@ def handler(event, context):
     try:
         downloaded = _download_snapshot(ARTIFACTS_BUCKET, s3_prefix, work_dir)
         if not downloaded:
-            raise ValueError(f"no .tf files found under s3://{ARTIFACTS_BUCKET}/{s3_prefix}")
+            raise ValueError(f"no Terraform files found under s3://{ARTIFACTS_BUCKET}/{s3_prefix}")
 
         tfsec_results, tfsec_parse_errors = _run_tfsec(work_dir)
         checkov_report = _run_checkov(work_dir)
@@ -170,7 +184,7 @@ def _download_snapshot(bucket, prefix, dest_dir):
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if not key.endswith(".tf"):
+            if not key.endswith(SNAPSHOT_SUFFIXES):
                 continue
             rel_path = key[len(prefix):]
             local_path = os.path.join(dest_dir, rel_path)
@@ -226,7 +240,7 @@ def _run_checkov(work_dir):
     env["CKV_SKIP_PACKAGE_UPDATE_CHECK"] = "true"
 
     proc = subprocess.run(
-        [sys.executable, "-m", "checkov.main", "-d", work_dir, "--framework", "terraform", "-o", "json", "--compact"],
+        [sys.executable, "-m", "checkov.main", "-d", work_dir, "--framework", CHECKOV_FRAMEWORKS, "-o", "json", "--compact"],
         capture_output=True,
         text=True,
         timeout=SCAN_TIMEOUT_SECONDS,
@@ -294,14 +308,31 @@ def _checkov_parse_errors(report, work_dir):
     make the report non-empty, so that shape means zero parse errors, not
     unknown.
     """
-    parse_errors = ((report.get("results") or {}).get("parsing_errors")) or []
+    parse_errors = [
+        path for r in _checkov_reports(report)
+        for path in ((r.get("results") or {}).get("parsing_errors") or [])
+    ]
     return sorted({_relativize_path(path, work_dir) for path in parse_errors})
+
+
+def _checkov_reports(report):
+    """checkov's JSON is one report object when a single framework had
+    anything to say and a list of them when more than one did (see
+    runner_registry upstream: a lone report is unwrapped, several are not).
+    With `terraform,secrets` both shapes occur -- a list whenever a secret
+    fires, a dict otherwise -- so every consumer goes through here."""
+    if isinstance(report, list):
+        return report
+    return [report]
 
 
 def _normalize_checkov(report, pr_id):
     now = datetime.now(timezone.utc).isoformat()
     findings = []
-    failed_checks = ((report.get("results") or {}).get("failed_checks")) or []
+    failed_checks = [
+        c for r in _checkov_reports(report)
+        for c in ((r.get("results") or {}).get("failed_checks") or [])
+    ]
     for c in failed_checks:
         findings.append(_build_finding(
             pr_id=pr_id,
