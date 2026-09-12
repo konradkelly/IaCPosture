@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
@@ -29,6 +30,8 @@ logger.setLevel(logging.INFO)
 
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "unknown")
+METRIC_NAMESPACE = "IaCPosture"
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
@@ -313,6 +316,17 @@ def _post_review(pr_id, finding_id, raw_body, event):
     if action in ("edited", "rejected"):
         reopened = _reopen_dependents(pr_id, finding_id, action, actor, now)
 
+    # Spec §7.3's fix-acceptance rate, as its raw counts. One metric with the
+    # action as a dimension, so approved / edited / rejected are three series
+    # in one namespace and the rate is a metric-math expression over them
+    # rather than a fourth thing to keep consistent. Emitted after every write
+    # has succeeded, so a decision that failed to record is not counted.
+    _emit_metrics(
+        {"ReviewDecisions": 1},
+        {"Environment": ENVIRONMENT, "Action": action},
+        pr_id=pr_id, finding_id=finding_id, event="review_decision",
+    )
+
     return _ok({
         "finding_id": finding_id,
         "action": action,
@@ -326,6 +340,32 @@ def _post_review(pr_id, finding_id, raw_body, event):
 
 
 # ---------- helpers ----------
+
+
+def _emit_metrics(metrics, dimensions, **context):
+    """Publish CloudWatch metrics by printing one Embedded Metric Format line.
+
+    print(), not logger: Lambda prefixes logger output with level, timestamp
+    and request id, and EMF needs the whole log event to be the JSON object.
+    CloudWatch extracts the metrics from the log stream, so this costs no IAM,
+    no SDK call, and no extra latency -- and the line doubles as a structured
+    record of the run. Namespace and dimension names are the contract with
+    terraform/observability.tf; metric names are the contract with anyone
+    graphing them.
+    """
+    print(json.dumps({
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": METRIC_NAMESPACE,
+                "Dimensions": [sorted(dimensions)],
+                "Metrics": [{"Name": name, "Unit": "Count"} for name in metrics],
+            }],
+        },
+        **dimensions,
+        **metrics,
+        **context,
+    }))
 
 def _content_key(pr_id, finding_id, file_path):
     """Where a fix's corrected file lives. Must match remediation-agent's

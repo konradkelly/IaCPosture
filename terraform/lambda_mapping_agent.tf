@@ -31,6 +31,14 @@ resource "aws_lambda_function" "mapping_agent" {
   handler          = "handler.handler"
   runtime          = "python3.12"
 
+  # Spec §4.1: one trace from the trigger through scan -> map -> remediate,
+  # including remediation-agent's synchronous self-check invoke of the
+  # scanner. The X-Ray SDK is not needed for that -- Active mode traces the
+  # invocation and the boto3 calls it makes.
+  tracing_config {
+    mode = "Active"
+  }
+
   layers = [aws_lambda_layer_version.anthropic.arn]
 
   timeout     = 120

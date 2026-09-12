@@ -28,6 +28,12 @@ variable "remediation_agent_model" {
   default     = "claude-opus-5"
 }
 
+variable "alarm_email" {
+  description = "Address to subscribe to the alarms SNS topic. SNS emails a confirmation link that must be clicked before anything is delivered; until then the alarms still fire, they just reach nobody. Leave null to create the topic with no subscriber."
+  type        = string
+  default     = null
+}
+
 variable "dashboard_extra_origins" {
   description = "Origins allowed to call the review API and complete a Cognito login, in addition to the CloudFront distribution (which is always allowed). Defaults to the Vite dev server so `npm run dev` works against deployed infrastructure; set to [] for an environment that should only be reachable through CloudFront. Note these are browser conventions, not access control -- the JWT authorizer in api_gateway.tf is what actually gates the API."
   type        = list(string)

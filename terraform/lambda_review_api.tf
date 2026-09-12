@@ -21,6 +21,14 @@ resource "aws_lambda_function" "review_api" {
   handler          = "handler.handler"
   runtime          = "python3.12"
 
+  # Spec §4.1: one trace from the trigger through scan -> map -> remediate,
+  # including remediation-agent's synchronous self-check invoke of the
+  # scanner. The X-Ray SDK is not needed for that -- Active mode traces the
+  # invocation and the boto3 calls it makes.
+  tracing_config {
+    mode = "Active"
+  }
+
   # Interactive request path -- a dashboard user is waiting on every call, and
   # the work is a couple of DynamoDB round-trips. Unlike the agent Lambdas this
   # wants low latency, not a long ceiling.
@@ -33,6 +41,8 @@ resource "aws_lambda_function" "review_api" {
       # A reviewer's edit is the corrected file, and the diff is computed here
       # against the fix's base -- both live in the artifacts bucket.
       ARTIFACTS_BUCKET = aws_s3_bucket.artifacts.bucket
+      # Dimension on the metrics the handler emits (observability.tf).
+      ENVIRONMENT = var.environment
     }
   }
 

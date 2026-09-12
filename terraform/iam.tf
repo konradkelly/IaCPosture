@@ -69,6 +69,14 @@ data "aws_iam_policy_document" "terraform_scanner" {
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:BatchWriteItem"]
     resources = [aws_dynamodb_table.findings.arn]
   }
+
+  # Active tracing needs the function to be able to ship its segments.
+  # Region-scoped resource ARNs don't exist for these two actions.
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "terraform_scanner" {
@@ -108,6 +116,14 @@ data "aws_iam_policy_document" "mapping_agent" {
     sid       = "AnthropicApiKeyRead"
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [aws_secretsmanager_secret.anthropic_api_key.arn]
+  }
+
+  # Active tracing needs the function to be able to ship its segments.
+  # Region-scoped resource ARNs don't exist for these two actions.
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    resources = ["*"]
   }
 }
 
@@ -161,6 +177,14 @@ data "aws_iam_policy_document" "remediation_agent" {
       "${aws_s3_bucket.artifacts.arn}/fixes/*",
     ]
   }
+
+  # Active tracing needs the function to be able to ship its segments.
+  # Region-scoped resource ARNs don't exist for these two actions.
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "remediation_agent" {
@@ -207,6 +231,14 @@ data "aws_iam_policy_document" "review_api" {
     sid       = "WriteEditedFixContent"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.artifacts.arn}/fixes/*"]
+  }
+
+  # Active tracing needs the function to be able to ship its segments.
+  # Region-scoped resource ARNs don't exist for these two actions.
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    resources = ["*"]
   }
 }
 

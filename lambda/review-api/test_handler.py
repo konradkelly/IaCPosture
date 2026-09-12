@@ -127,6 +127,32 @@ def _review(action, **extra):
     )
 
 
+def _emf_lines(captured_out):
+    """Every EMF record in stdout, parsed, with the shape CloudWatch requires
+    checked: an _aws block whose metric names and dimension keys all exist as
+    top-level fields. A record that fails this is silently ignored by
+    CloudWatch, which is the failure mode a test has to catch."""
+    records = []
+    for line in captured_out.splitlines():
+        if not line.startswith("{"):
+            continue
+        rec = json.loads(line)
+        if "_aws" not in rec:
+            continue
+        aws = rec["_aws"]
+        assert isinstance(aws["Timestamp"], int)
+        for block in aws["CloudWatchMetrics"]:
+            assert block["Namespace"] == "IaCPosture"
+            for dim_set in block["Dimensions"]:
+                for key in dim_set:
+                    assert key in rec, f"dimension {key} has no value"
+            for m in block["Metrics"]:
+                assert m["Name"] in rec, f"metric {m['Name']} has no value"
+                assert isinstance(rec[m["Name"]], (int, float))
+        records.append(rec)
+    return records
+
+
 # ---------- reads ----------
 
 def test_list_findings_returns_the_prs_findings(mock_table):
@@ -220,6 +246,38 @@ def test_approve_writes_an_audit_event_and_resolves_the_finding(mock_table):
 
     update_values = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
     assert update_values[":status"] == "resolved"
+
+
+@pytest.mark.parametrize("action,extra", [
+    ("approved", {}),
+    ("edited", {"edited_content": "reviewer version\n"}),
+    ("rejected", {}),
+])
+def test_every_recorded_decision_emits_one_review_decisions_metric(mock_table, capsys, action, extra):
+    """Spec §7.3's fix-acceptance rate, as raw counts: one metric, the action
+    as a dimension, so the rate is metric math over three series rather than
+    a fourth thing to keep consistent."""
+    mock_table.get_item.return_value = {"Item": FINDING}
+
+    response = handler.handler(_review(action, **extra), None)
+    assert response["statusCode"] == 200
+
+    records = _emf_lines(capsys.readouterr().out)
+    assert len(records) == 1
+    assert records[0]["ReviewDecisions"] == 1
+    assert records[0]["Action"] == action
+    assert records[0]["finding_id"] == "abc123"
+
+
+def test_a_blocked_decision_emits_no_metric(mock_table, capsys):
+    """A 409 is not a decision. Counting it would inflate the denominator of
+    the acceptance rate with attempts that never recorded anything."""
+    _chain(mock_table, _dependent(SATISFIED), PREREQ, [])
+
+    response = handler.handler(_review("approved"), None)
+    assert response["statusCode"] == 409
+
+    assert _emf_lines(capsys.readouterr().out) == []
 
 
 def test_reject_audits_the_decision_and_returns_the_finding_to_human_review(mock_table):
