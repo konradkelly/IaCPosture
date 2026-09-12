@@ -455,6 +455,21 @@ def _call_remediation_agent(finding, original_content):
         "this specific finding only -- do not restructure unrelated code or "
         "address other findings in the file. Return the full file, not a "
         "diff or a snippet. Also return a short rationale for the fix.\n\n"
+        # Observed on demo-1: fixing aws-s3-block-public-acls added an
+        # aws_s3_bucket_public_access_block with only block_public_acls set,
+        # and CKV_AWS_54/55/56 fired on the three attributes left out. They
+        # could not fire before, because the resource did not exist. The
+        # self-check correctly held the fix -- minimality itself had created
+        # the findings. See spec §8.3.
+        "One exception to minimality: if the fix means adding a resource or "
+        "block that did not exist, configure it completely rather than "
+        "setting only the one attribute this finding names. Scanners check "
+        "such a resource attribute by attribute, so a half-configured one "
+        "raises a finding for every attribute left out -- attributes that "
+        "were not findings before, because there was no resource to check. "
+        "Completing something you are already adding is not scope creep; it "
+        "is the smaller change. This does not license touching resources the "
+        "fix does not need to add.\n\n"
         "Fix the underlying configuration. Never silence the scanner: do not "
         "add tfsec:ignore, trivy:ignore, checkov:skip, nosec, or any other "
         "suppression comment. If you believe the flagged configuration is "
