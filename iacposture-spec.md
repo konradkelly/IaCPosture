@@ -330,7 +330,8 @@ of the same type does this and can never self-check clean. The honest options
 are to scan only changed resources, or to accept that this class always lands
 in human review.
 
-**Partial fixes to a resource that gates several rules.** On `demo-1`, the fix
+**Partial fixes to a resource that gates several rules.** *(Prompt amended
+2026-09-12; unverified live at time of writing — see below.)* On `demo-1`, the fix
 for `aws-s3-block-public-acls` introduced `CKV_AWS_54`, `55` and `56`. The
 bucket had no `aws_s3_bucket_public_access_block` at all, so checkov's
 per-setting rules had nothing to evaluate; adding the resource with only the
@@ -340,6 +341,16 @@ minimal fix is to create it completely, not partially — which the prompt's
 "minimal fix for this specific finding only" argues against. The model
 sometimes gets this right anyway (`CKV2_AWS_6` on the same file set all four
 and passed), so it is prompt calibration rather than a code gate.
+
+The prompt now carries one stated exception to minimality: when a fix means
+adding a resource or block that did not exist, configure it completely, on
+the grounds that completing something you are already adding is the *smaller*
+change than leaving attributes to fire as new findings. Deliberately narrow —
+it does not license touching resources the fix does not need to add. Whether
+it works is a question for a live run, not a unit test: the reproduction is
+`scripts/scan.py lambda/terraform-scanner/fixtures/vulnerable-sample` with
+only `tfsec:aws-s3-block-public-acls` left mapped, which previously produced
+`CKV_AWS_54/55/56` and should now produce none.
 
 ---
 
