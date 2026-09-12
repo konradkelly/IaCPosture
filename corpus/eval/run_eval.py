@@ -25,6 +25,14 @@ against recall -- a case labelled for its encryption pair will also raise a
 dozen other S3 rules, and that is correct behaviour, not noise. The
 exception is clean-control cases, which expect nothing, so anything they
 raise is a false positive and is reported as such.
+
+Also reports **mapping coverage** (spec §7.1's second half): what fraction of
+findings have a candidate control in corpus/rule_mappings.json, so
+mapping-agent has something to cite rather than leaving them "raw". Read
+from the file, not from a mapping-agent run -- it is a property of the
+corpus, costs nothing, and is deterministic. It measures whether a finding
+*can* be mapped, not whether the agent picks well among the candidates;
+that needs a labelled control per case and a run, and is not measured here.
 """
 
 import argparse
@@ -39,6 +47,13 @@ import boto3
 
 HERE = pathlib.Path(__file__).resolve().parent
 CASES = HERE / "cases"
+RULE_MAPPINGS = HERE.parent / "rule_mappings.json"
+
+
+def load_mappings():
+    """(source, rule_id) pairs that have at least one candidate control."""
+    raw = json.loads(RULE_MAPPINGS.read_text(encoding="utf-8"))["mappings"]
+    return {tuple(k.split(":", 1)) for k, v in raw.items() if v}
 
 
 def bucket_from_terraform():
@@ -85,7 +100,7 @@ def delete_prefix(s3, bucket, prefix):
         s3.delete_objects(Bucket=bucket, Delete={"Objects": keys[i:i + 1000]})
 
 
-def evaluate(cases, scan_body):
+def evaluate(cases, scan_body, mapped):
     fired = collections.defaultdict(set)
     for f in scan_body["findings"]:
         case_name = f["file"].split("/", 1)[0]
@@ -104,11 +119,17 @@ def evaluate(cases, scan_body):
             "missed": sorted(c["expected"] - got),
             "unexpected": sorted(got - c["expected"]),
             "parse_error": name in unparsed,
+            # Of the pairs this case expected AND that fired, how many can be
+            # mapped. Scoped to hits because an expected pair the scanner
+            # never found is a detection problem, not a mapping one, and
+            # counting it twice would blame the corpus for a scanner gap.
+            "mapped": sorted(hits & mapped),
+            "unmapped": sorted(hits - mapped),
         }
     return results
 
 
-def summarise(results):
+def summarise(results, scan_body, mapped):
     def recall(rows):
         exp = sum(len(r["expected"]) for r in rows)
         hit = sum(len(r["hit"]) for r in rows)
@@ -128,8 +149,30 @@ def summarise(results):
             by_src[src][0] += 1
 
     hit, exp = recall(positives)
+
+    # Two mapping numbers, because they answer different questions.
+    #
+    # Labelled: of the pairs these cases were written to catch and that fired,
+    # how many can be mapped. The headline, comparable with recall above.
+    #
+    # All findings: of everything the scan actually produced, how many can be
+    # mapped. Lower and more honest about a real PR, because the labels are a
+    # deliberate minimum -- a bare bucket raises a dozen rules and its case
+    # expects one pair. This is the number a reviewer's queue would reflect.
+    labelled_hits = {p for r in positives for p in map(tuple, r["hit"])}
+    all_fired = {(f["source"], f["rule_id"]) for f in scan_body["findings"]}
+    unmapped_by_count = collections.Counter(
+        f"{src}:{rid}" for f in scan_body["findings"]
+        for src, rid in [(f["source"], f["rule_id"])] if (src, rid) not in mapped
+    )
+
     return {
         "overall": {"hit": hit, "expected": exp, "recall": hit / exp if exp else None},
+        "mapping": {
+            "labelled": {"mapped": len(labelled_hits & mapped), "total": len(labelled_hits)},
+            "all_findings": {"mapped": len(all_fired & mapped), "total": len(all_fired)},
+            "unmapped_rules": dict(unmapped_by_count.most_common()),
+        },
         "by_category": {k: dict(zip(("hit", "expected"), recall(v))) for k, v in sorted(by_cat.items())},
         "by_source": {k: {"hit": v[0], "expected": v[1]} for k, v in sorted(by_src.items())},
         "clean_controls": {r_name: r["unexpected"] for r_name, r in results.items()
@@ -157,6 +200,20 @@ def print_report(results, summary):
     for src, v in summary["by_source"].items():
         pct = v["hit"] / v["expected"] if v["expected"] else 0
         print(f"  {src:24s} {v['hit']:3d}/{v['expected']:<3d}  {pct:6.1%}")
+
+    m = summary["mapping"]
+    lab, allf = m["labelled"], m["all_findings"]
+    print("\nmapping coverage -- a candidate control exists to cite")
+    print(f"  {'labelled pairs that fired':24s} {lab['mapped']:3d}/{lab['total']:<3d}  "
+          f"{lab['mapped'] / lab['total'] if lab['total'] else 0:6.1%}")
+    print(f"  {'all distinct rules fired':24s} {allf['mapped']:3d}/{allf['total']:<3d}  "
+          f"{allf['mapped'] / allf['total'] if allf['total'] else 0:6.1%}")
+    if m["unmapped_rules"]:
+        print(f"  unmapped, by how often they fired ({len(m['unmapped_rules'])} rules)")
+        for rule, n in list(m["unmapped_rules"].items())[:12]:
+            print(f"    {n:3d}x  {rule}")
+        if len(m["unmapped_rules"]) > 12:
+            print(f"    ... and {len(m['unmapped_rules']) - 12} more (full list in --report)")
 
     misses = [(n, r) for n, r in results.items() if r["missed"]]
     print(f"\nmissed ({sum(len(r['missed']) for _, r in misses)})")
@@ -205,8 +262,9 @@ def main():
             delete_prefix(s3, bucket, prefix)
     print(f" {time.time() - t0:.0f}s, {body['finding_count']} findings")
 
-    results = evaluate(cases, body)
-    summary = summarise(results)
+    mapped = load_mappings()
+    results = evaluate(cases, body, mapped)
+    summary = summarise(results, body, mapped)
     print_report(results, summary)
 
     if args.report:
