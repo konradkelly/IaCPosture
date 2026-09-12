@@ -262,6 +262,11 @@ The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now a
 
 **Measured again across every fix in the table on 2026-09-12**, after the gate had been live for four days: of 14 drafted fixes, 7 passed to `fix-proposed` and 6 were held — but only **2 of those 6 were held by `assumptions`**, both on PugetScope's security groups, and both name a real dependency (ACME HTTP-01, and `var.admin_cidrs` being populated). The other 4 were held by `self_check_new_findings`. On `demo-1`'s self-contained bucket fixes the gate fired **zero** times. So the consequence-based wording is holding: it is quiet on fixes that can be checked from the file and loud on the ones that cannot. The dominant reason a fix is held is not assumptions but a fix that introduces new findings — see §8.3.
 
+**Where this leads.** An assumption is a question the agent could not ask.
+`docs/context-agent-spec.md` (v5) is the component that asks them, under the
+same retrieve-and-cite discipline `mapping-agent` already uses for controls —
+and the resolution rate of the assumptions now in the table is its eval.
+
 **On division of labour between prompt and code.** The prompt is what changed the agent's *behaviour* — it stopped suppressing, and started constraining rather than deleting. The code gates are what make that behaviour non-optional. As of this writing neither the suppression nor the deletion gate has fired in production, because the prompt has so far prevented the behaviour they guard against; they are proven by unit tests against the real captured diffs. That is the intended arrangement, not a redundancy: a prompt is a request, and the project's premise is that the model's output is checked by code rather than trusted.
 
 ---
@@ -282,6 +287,18 @@ The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now a
 | **v2 — Add Kubernetes/Helm scanning** | `k8s-scanner` Lambda added alongside `terraform-scanner`, same shared Checkov layer, `webhook-receiver`/`mapping-agent`/`remediation-agent`/dashboard unchanged (see §4.4). CIS Kubernetes Benchmark + OWASP Cloud-Native guidance added to the control corpus. |
 | **v3 — CI integration** | GitHub App/webhook, PR-triggered scans, diff suggestions posted as PR comments |
 | **v4 — Write-back on approval** | Approved fixes committed to PR branch automatically |
+| **v5 — `context-agent`** | A retrieval step that answers what `remediation-agent` currently has to declare it cannot: it reads the rest of the repository and cites `file:line`. Deferred deliberately, not for lack of motivation — the evidence is already in the table (see below). [`docs/context-agent-spec.md`](./context-agent-spec.md) |
+
+**On v5's position.** `assumptions` is, read literally, a list of queries the
+agent wanted to run and could not — and four of the six in the live table are
+answerable from Terraform already in the snapshot. So the case for
+`context-agent` is measured rather than speculative, and it is last anyway,
+for two reasons that are dependencies rather than preferences: the snapshot
+carries `**/*.tf` only, so two of those six questions have no files to read;
+and a multi-call agent has no execution budget until remediation fans out
+(§8.2 item 5). Corpus growth is **not** among its prerequisites — it reads the
+repository, not `corpus/` — and coupling the two would make it wait on
+something it does not need.
 
 **Recommended sequencing given your Feb–June 2027 timeline:** ship v1 first as a complete, demoable artifact — Terraform-only already exercises every DVA-C02-relevant AWS resource in §4.1 except `k8s-scanner` itself. Add v2 (K8s/Helm) once v1's eval numbers (§7) are solid, then invest in v3's GitHub App plumbing last, since it's the most infra-heavy phase for the least new agent-architecture learning.
 
