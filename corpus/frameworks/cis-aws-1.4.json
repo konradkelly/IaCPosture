@@ -4,6 +4,11 @@
   "source": "https://docs.aws.amazon.com/config/latest/developerguide/operational-best-practices-for-cis_aws_benchmark_level_1.html",
   "controls": [
     {
+      "control_id": "1.15",
+      "title": "IAM users receive permissions only through groups",
+      "text": "Permissions should be attached to groups or roles rather than directly to individual IAM users, so access is managed in one place and is auditable per role rather than per person."
+    },
+    {
       "control_id": "1.16",
       "title": "IAM policies that allow full \"*:*\" administrative privileges are not attached",
       "text": "IAM policies must not grant \"Effect\": \"Allow\" with \"Action\": \"*\" over \"Resource\": \"*\"; scope permissions to what a role or user actually needs."
@@ -34,9 +39,34 @@
       "text": "RDS instances and their storage should have encryption at rest enabled at creation time, since it cannot be enabled retroactively without a snapshot-and-restore."
     },
     {
+      "control_id": "3.1",
+      "title": "CloudTrail is enabled in all regions",
+      "text": "A multi-region CloudTrail trail should be enabled so API activity is recorded in every region, including ones the account does not intentionally use."
+    },
+    {
+      "control_id": "3.2",
+      "title": "CloudTrail log file validation is enabled",
+      "text": "CloudTrail log file validation should be enabled so delivered log files can be proven unmodified since CloudTrail wrote them."
+    },
+    {
       "control_id": "3.6",
       "title": "S3 bucket access logging is enabled",
       "text": "S3 buckets should have server access logging enabled so requests against the bucket are recorded for later security investigation."
+    },
+    {
+      "control_id": "3.7",
+      "title": "CloudTrail logs are encrypted at rest using KMS CMKs",
+      "text": "CloudTrail log files should be encrypted at rest with a customer-managed KMS key, so reading the audit trail requires a key permission as well as bucket access."
+    },
+    {
+      "control_id": "3.8",
+      "title": "Rotation for customer created symmetric CMKs is enabled",
+      "text": "Customer-managed symmetric KMS keys should have automatic annual rotation enabled, so the material protecting long-lived data changes without re-encrypting it."
+    },
+    {
+      "control_id": "3.9",
+      "title": "VPC flow logging is enabled in all VPCs",
+      "text": "VPC flow logs should be enabled on every VPC so rejected and accepted traffic can be reconstructed during an investigation."
     },
     {
       "control_id": "5.1",
@@ -47,6 +77,11 @@
       "control_id": "5.2",
       "title": "No security groups allow ingress from 0.0.0.0/0 to remote server administration ports",
       "text": "Security groups should not permit inbound traffic from 0.0.0.0/0 to remote administration ports such as 22 (SSH) or 3389 (RDP); restrict to known source ranges."
+    },
+    {
+      "control_id": "5.3",
+      "title": "The default security group of every VPC restricts all traffic",
+      "text": "Each VPC's default security group should allow no inbound or outbound traffic, since anything launched without an explicit security group inherits it."
     }
   ]
 }

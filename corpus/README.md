@@ -37,6 +37,40 @@ a scanner rule with no confident mapping (e.g. pure hygiene checks like
 than forced onto a control it doesn't really violate. Extend both files as
 new rule_ids turn up in real scans.
 
+## Coverage
+
+48 rules mapped, against 16 CIS controls and the two OWASP lists. Measured
+against `eval/`, whose 40 cases were all observed firing in a real scan:
+**48 of 67 labelled `(source, rule_id)` pairs have a candidate control (72%)**,
+from 9 rules before 2026-09-12.
+
+| category | mapped |
+|---|---|
+| network-exposure | 18/19 |
+| logging-monitoring | 8/10 |
+| iam-over-permissioning | 7/11 |
+| missing-encryption | 10/21 |
+| hardcoded-secrets | 3/4 |
+| unpinned-modules | 2/2 |
+
+The 19 unmapped pairs are unmapped on purpose, and they cluster:
+
+- **Encryption at rest for resources CIS AWS 1.4 does not cover** — SNS, SQS,
+  DynamoDB, EFS, Lambda environment variables, CloudWatch log groups. The
+  benchmark has controls for S3, EBS, RDS and CloudTrail and stops there.
+  Mapping these to a general "insecure configuration" control would be
+  force-mapping.
+- **Cloudsplaining IAM findings** (`CKV_AWS_286`, `CKV_AWS_287`) — privilege
+  escalation and credentials exposure. CIS 1.16 is specifically about
+  `"*:*"` admin policies, which is narrower than what these match.
+- **Log retention** (`CKV_AWS_66`, `CKV_AWS_338`) — a real control gap rather
+  than a missing mapping.
+
+Closing those needs new framework content, not new mappings, which is a
+different judgement call: the `text` of a control is what `mapping-agent`
+cites verbatim, so adding one means writing text that will be quoted as
+ground truth.
+
 ## Not the corpus: `eval/`
 
 `eval/` is the detection-recall harness for `terraform-scanner` (spec §7.1),

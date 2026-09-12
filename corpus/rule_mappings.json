@@ -1,32 +1,321 @@
 {
   "_comment": "Maps a scanner finding's (source, rule_id) to candidate controls in frameworks/*.json. mapping-agent uses this as a deterministic first pass -- it looks up candidates here, pulls their text from S3, and only asks the LLM to pick/cite/explain among those candidates rather than freely guessing a control_id. Entries are grounded in rule_ids actually observed from lambda/terraform-scanner/fixtures/vulnerable-sample; extend as new rule_ids show up in real scans rather than guessing ahead of evidence. A rule with no confident mapping (e.g. pure hygiene checks like missing descriptions) is deliberately left out rather than force-mapped.",
   "mappings": {
-    "tfsec:aws-ec2-no-public-ingress-sgr": [
-      { "framework": "CIS-AWS-1.4", "control_id": "5.2" }
+    "checkov:CKV2_AWS_11": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.9"
+      }
     ],
-    "tfsec:aws-s3-block-public-acls": [
-      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
-    ],
-    "tfsec:aws-s3-block-public-policy": [
-      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
-    ],
-    "tfsec:aws-s3-enable-bucket-encryption": [
-      { "framework": "CIS-AWS-1.4", "control_id": "2.1.1" }
-    ],
-    "tfsec:aws-s3-enable-bucket-logging": [
-      { "framework": "CIS-AWS-1.4", "control_id": "3.6" }
-    ],
-    "checkov:CKV_AWS_24": [
-      { "framework": "CIS-AWS-1.4", "control_id": "5.2" }
-    ],
-    "checkov:CKV_AWS_18": [
-      { "framework": "CIS-AWS-1.4", "control_id": "3.6" }
-    ],
-    "checkov:CKV_AWS_145": [
-      { "framework": "CIS-AWS-1.4", "control_id": "2.1.1" }
+    "checkov:CKV2_AWS_12": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "5.3"
+      },
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
     ],
     "checkov:CKV2_AWS_6": [
-      { "framework": "CIS-AWS-1.4", "control_id": "2.1.5" }
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.1.5"
+      }
+    ],
+    "checkov:CKV_AWS_1": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.16"
+      }
+    ],
+    "checkov:CKV_AWS_130": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-1"
+      }
+    ],
+    "checkov:CKV_AWS_145": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.1.1"
+      }
+    ],
+    "checkov:CKV_AWS_16": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.3.1"
+      }
+    ],
+    "checkov:CKV_AWS_17": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "checkov:CKV_AWS_18": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.6"
+      }
+    ],
+    "checkov:CKV_AWS_24": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "5.2"
+      }
+    ],
+    "checkov:CKV_AWS_25": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "5.2"
+      }
+    ],
+    "checkov:CKV_AWS_277": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "5.2"
+      },
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "checkov:CKV_AWS_3": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.2.1"
+      }
+    ],
+    "checkov:CKV_AWS_35": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.7"
+      }
+    ],
+    "checkov:CKV_AWS_36": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.2"
+      }
+    ],
+    "checkov:CKV_AWS_38": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "checkov:CKV_AWS_382": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "checkov:CKV_AWS_39": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "checkov:CKV_AWS_40": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.15"
+      }
+    ],
+    "checkov:CKV_AWS_41": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-5"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-6"
+      }
+    ],
+    "checkov:CKV_AWS_46": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-5"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-6"
+      }
+    ],
+    "checkov:CKV_AWS_62": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.16"
+      }
+    ],
+    "checkov:CKV_AWS_63": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.16"
+      }
+    ],
+    "checkov:CKV_AWS_67": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.1"
+      }
+    ],
+    "checkov:CKV_AWS_7": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.8"
+      }
+    ],
+    "checkov:CKV_AWS_88": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-1"
+      }
+    ],
+    "checkov:CKV_TF_1": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-4"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-9"
+      }
+    ],
+    "checkov:CKV_TF_2": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-4"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-9"
+      }
+    ],
+    "tfsec:aws-cloudtrail-enable-all-regions": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.1"
+      }
+    ],
+    "tfsec:aws-cloudtrail-enable-at-rest-encryption": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.7"
+      }
+    ],
+    "tfsec:aws-cloudtrail-enable-log-validation": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.2"
+      }
+    ],
+    "tfsec:aws-ec2-enable-volume-encryption": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.2.1"
+      }
+    ],
+    "tfsec:aws-ec2-no-public-egress-sgr": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "tfsec:aws-ec2-no-public-ingress-sgr": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "5.2"
+      }
+    ],
+    "tfsec:aws-ec2-no-public-ip-subnet": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-1"
+      }
+    ],
+    "tfsec:aws-ec2-no-secrets-in-user-data": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-5"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-6"
+      }
+    ],
+    "tfsec:aws-ec2-require-vpc-flow-logs-for-all-vpcs": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.9"
+      }
+    ],
+    "tfsec:aws-eks-no-public-cluster-access": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "tfsec:aws-eks-no-public-cluster-access-to-cidr": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "tfsec:aws-iam-no-policy-wildcards": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.16"
+      }
+    ],
+    "tfsec:aws-iam-no-user-attached-policies": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "1.15"
+      }
+    ],
+    "tfsec:aws-kms-auto-rotate-keys": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.8"
+      }
+    ],
+    "tfsec:aws-rds-encrypt-instance-storage-data": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.3.1"
+      }
+    ],
+    "tfsec:aws-rds-no-public-db-access": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-6"
+      }
+    ],
+    "tfsec:aws-s3-block-public-acls": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.1.5"
+      }
+    ],
+    "tfsec:aws-s3-block-public-policy": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.1.5"
+      }
+    ],
+    "tfsec:aws-s3-enable-bucket-encryption": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "2.1.1"
+      }
+    ],
+    "tfsec:aws-s3-enable-bucket-logging": [
+      {
+        "framework": "CIS-AWS-1.4",
+        "control_id": "3.6"
+      }
     ]
   }
 }

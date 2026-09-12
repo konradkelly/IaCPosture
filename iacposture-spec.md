@@ -260,6 +260,8 @@ Two structural consequences, both enforced in `remediation-agent` rather than re
 
 The surviving port-80 assumption names ACME HTTP-01 explicitly, so the fix now arrives with its own falsification test attached.
 
+**Measured again across every fix in the table on 2026-09-12**, after the gate had been live for four days: of 14 drafted fixes, 7 passed to `fix-proposed` and 6 were held — but only **2 of those 6 were held by `assumptions`**, both on PugetScope's security groups, and both name a real dependency (ACME HTTP-01, and `var.admin_cidrs` being populated). The other 4 were held by `self_check_new_findings`. On `demo-1`'s self-contained bucket fixes the gate fired **zero** times. So the consequence-based wording is holding: it is quiet on fixes that can be checked from the file and loud on the ones that cannot. The dominant reason a fix is held is not assumptions but a fix that introduces new findings — see §8.3.
+
 **On division of labour between prompt and code.** The prompt is what changed the agent's *behaviour* — it stopped suppressing, and started constraining rather than deleting. The code gates are what make that behaviour non-optional. As of this writing neither the suppression nor the deletion gate has fired in production, because the prompt has so far prevented the behaviour they guard against; they are proven by unit tests against the real captured diffs. That is the intended arrangement, not a redundancy: a prompt is a request, and the project's premise is that the model's output is checked by code rather than trusted.
 
 ---
@@ -314,6 +316,30 @@ What the sections above specify for the scanner versus what exists, as of 2026-0
 | 4 | **Scan surface** — `.tfvars` and `.tf.json` in the snapshot; `--download-external-modules` so registry/git modules are scanned; a secret scanner | §2 goals: hardcoded secrets, unpinned module sources | The scanner reads `.tf` only, never runs `init`, and runs checkov with `--framework terraform` alone, so the `secrets` framework is off | After 1, so the coverage gain is measured rather than claimed |
 | 5 | **Orchestration** — DynamoDB stream or SQS between scan → map → remediate; Step Functions Map to fan remediation out one finding per invocation | §4.4 step 4; `lambda_remediation_agent.tf`'s own timeout comment | Not built. No stage triggers the next | Bigger, and closer to v3's plumbing than v1's |
 | 6 | **tfsec → Trivy** | §4.3 | tfsec is end-of-life upstream; rules land in Trivy only | Verify upstream status first. Brings K8s/Helm/Dockerfile scanning from one binary, which pre-solves part of v2's layer |
+
+### 8.3 Why fixes are held: the two `new findings` patterns
+
+`self_check_new_findings` is the most common reason a cleared fix is still held
+(4 of 6 holds as of 2026-09-12). Two distinct causes, worth separating because
+only one is a defect:
+
+**Recursion.** A fix for "bucket has no access logging" creates a log
+destination bucket, which inherits every rule the original violated —
+observed introducing 7 new findings. Any fix whose remedy is another resource
+of the same type does this and can never self-check clean. The honest options
+are to scan only changed resources, or to accept that this class always lands
+in human review.
+
+**Partial fixes to a resource that gates several rules.** On `demo-1`, the fix
+for `aws-s3-block-public-acls` introduced `CKV_AWS_54`, `55` and `56`. The
+bucket had no `aws_s3_bucket_public_access_block` at all, so checkov's
+per-setting rules had nothing to evaluate; adding the resource with only the
+one setting the finding asked for made the other three fire. **Minimality
+itself created the findings.** When one resource gates several rules, the
+minimal fix is to create it completely, not partially — which the prompt's
+"minimal fix for this specific finding only" argues against. The model
+sometimes gets this right anyway (`CKV2_AWS_6` on the same file set all four
+and passed), so it is prompt calibration rather than a code gate.
 
 ---
 
