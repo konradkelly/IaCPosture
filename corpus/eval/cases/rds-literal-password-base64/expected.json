@@ -1,0 +1,11 @@
+{
+  "description": "RDS master password as a string literal, with no characters outside the base64 charset",
+  "category": "hardcoded-secrets",
+  "expected": [
+    {
+      "source": "checkov",
+      "rule_id": "CKV_SECRET_6"
+    }
+  ],
+  "note": "Sibling of rds-literal-password, which differs only by a trailing `!`. Together they isolate checkov's punctuation gap: the EntropyKeywordCombinator scores the value with detect-secrets' base64/hex entropy scanners, whose regex requires an unbroken charset run up to the closing quote. Same mechanism as the CKV_AWS_60 pair."
+}

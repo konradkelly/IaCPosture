@@ -4,8 +4,8 @@
   "expected": [
     {
       "source": "checkov",
-      "rule_id": "CKV_SECRET_10"
+      "rule_id": "CKV_SECRET_6"
     }
   ],
-  "note": "Relabelled 2026-09-12 from CKV_SECRET_6. Reading checkov's SECRET_TYPE_TO_ID: 6 is the Base64 High Entropy plugin, 10 is Secret Keyword, and `password = \"...\"` is a keyword match. Was a predicted miss while the scanner ran --framework terraform alone; the secrets framework is on now, so this is expected to HIT."
+  "note": "Expected to MISS, and kept as a positive so the gap is measured. checkov's secret detection is EntropyKeywordCombinator: a keyword match must combine with a detect-secrets entropy scanner hit on the value, and those scanners match a quoted run of their charset only -- base64 (A-Za-z0-9+/=) or hex. The regex is `(['\":=])\\s*([<charset>]+)(['\"]|$)`, so a value containing any other character has no token to score. `Sup3rS3cretPassw0rd!` has a `!`, which describes most human-chosen passwords. The id is 6 (Base64 High Entropy), not 10: the combinator's own secret_type is empty and the id comes from whichever entropy scanner matched. Labelled 6 originally, relabelled to 10 on a misreading of SECRET_TYPE_TO_ID, and back to 6 on reading the combinator -- the corrections log has both moves."
 }

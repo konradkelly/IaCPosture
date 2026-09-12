@@ -9,6 +9,11 @@
     {
       "source": "tfsec",
       "rule_id": "aws-ec2-no-secrets-in-user-data"
+    },
+    {
+      "source": "checkov",
+      "rule_id": "CKV_SECRET_2"
     }
-  ]
+  ],
+  "note": "CKV_SECRET_2 (AWS Access Key) added after the secrets framework went live 2026-09-12: detect-secrets' AWSKeyDetector matches the AKIA... pattern."
 }

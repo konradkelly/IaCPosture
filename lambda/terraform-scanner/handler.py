@@ -70,6 +70,12 @@ SNAPSHOT_SUFFIXES = (".tf", ".tf.json", ".tfvars", ".tfvars.json")
 # strings. It was off, so spec §2's "hardcoded secrets" goal measured 75% on
 # the eval corpus with the miss being a literal RDS master password.
 CHECKOV_FRAMEWORKS = "terraform,secrets"
+# The secrets runner only opens files on checkov's SUPPORTED_FILE_EXTENSIONS
+# (.tf, .yml, .yaml, .json, .template, .bicep, .hcl) unless told to scan
+# everything. .tfvars is not on that list, which is the one file a hardcoded
+# password is most likely to be in. "All files" is bounded by
+# _download_snapshot, so this is exactly SNAPSHOT_SUFFIXES and nothing else.
+CHECKOV_SECRETS_ALL_FILES = "--enable-secret-scan-all-files"
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
@@ -240,7 +246,8 @@ def _run_checkov(work_dir):
     env["CKV_SKIP_PACKAGE_UPDATE_CHECK"] = "true"
 
     proc = subprocess.run(
-        [sys.executable, "-m", "checkov.main", "-d", work_dir, "--framework", CHECKOV_FRAMEWORKS, "-o", "json", "--compact"],
+        [sys.executable, "-m", "checkov.main", "-d", work_dir, "--framework", CHECKOV_FRAMEWORKS,
+         CHECKOV_SECRETS_ALL_FILES, "-o", "json", "--compact"],
         capture_output=True,
         text=True,
         timeout=SCAN_TIMEOUT_SECONDS,
