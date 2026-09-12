@@ -331,7 +331,7 @@ are to scan only changed resources, or to accept that this class always lands
 in human review.
 
 **Partial fixes to a resource that gates several rules.** *(Prompt amended
-2026-09-12; unverified live at time of writing — see below.)* On `demo-1`, the fix
+and verified live 2026-09-12 — see below.)* On `demo-1`, the fix
 for `aws-s3-block-public-acls` introduced `CKV_AWS_54`, `55` and `56`. The
 bucket had no `aws_s3_bucket_public_access_block` at all, so checkov's
 per-setting rules had nothing to evaluate; adding the resource with only the
@@ -346,11 +346,21 @@ The prompt now carries one stated exception to minimality: when a fix means
 adding a resource or block that did not exist, configure it completely, on
 the grounds that completing something you are already adding is the *smaller*
 change than leaving attributes to fire as new findings. Deliberately narrow —
-it does not license touching resources the fix does not need to add. Whether
-it works is a question for a live run, not a unit test: the reproduction is
-`scripts/scan.py lambda/terraform-scanner/fixtures/vulnerable-sample` with
-only `tfsec:aws-s3-block-public-acls` left mapped, which previously produced
-`CKV_AWS_54/55/56` and should now produce none.
+it does not license touching resources the fix does not need to add.
+
+**Verified live on the file that produced the failure.** Scanning
+`lambda/terraform-scanner/fixtures/vulnerable-sample` with only
+`tfsec:aws-s3-block-public-acls` left mapped, the fix now writes an
+`aws_s3_bucket_public_access_block` with all four attributes set and
+`self_check_new_findings: []`, against `CKV_AWS_54/55/56` before. A prompt is
+still a request, not a guarantee — nothing in code requires a complete
+resource, and the self-check remains what catches it when the model does not
+comply. What changed is how often it has to.
+
+The fix is still held, on one assumption: that nothing serves objects from
+the bucket anonymously. That is the assumptions gate working, not a
+regression — it is unverifiable from the file and its falsity would break a
+running system, which is exactly §6.1's test.
 
 ---
 
