@@ -160,6 +160,32 @@ def test_checkovs_bare_summary_shape_is_not_read_as_unknown():
     assert handler._checkov_parse_errors(bare_summary, WORK_DIR) == []
 
 
+def _emf_lines(captured_out):
+    """Every EMF record in stdout, parsed, with the shape CloudWatch requires
+    checked: an _aws block whose metric names and dimension keys all exist as
+    top-level fields. A record that fails this is silently ignored by
+    CloudWatch, which is the failure mode a test has to catch."""
+    records = []
+    for line in captured_out.splitlines():
+        if not line.startswith("{"):
+            continue
+        rec = json.loads(line)
+        if "_aws" not in rec:
+            continue
+        aws = rec["_aws"]
+        assert isinstance(aws["Timestamp"], int)
+        for block in aws["CloudWatchMetrics"]:
+            assert block["Namespace"] == "IaCPosture"
+            for dim_set in block["Dimensions"]:
+                for key in dim_set:
+                    assert key in rec, f"dimension {key} has no value"
+            for m in block["Metrics"]:
+                assert m["Name"] in rec, f"metric {m['Name']} has no value"
+                assert isinstance(rec[m["Name"]], (int, float))
+        records.append(rec)
+    return records
+
+
 # ---------- handler() ----------
 
 @patch.object(handler, "_write_findings")
@@ -184,6 +210,54 @@ def test_handler_surfaces_parse_errors_without_discarding_real_findings(
     assert result["scan_errors"] == ["broken.tf"]
     assert result["finding_count"] == 1
     mock_write.assert_called_once()
+
+
+@patch.object(handler, "_write_findings")
+@patch.object(handler, "_run_checkov")
+@patch.object(handler, "_run_tfsec")
+@patch.object(handler, "_download_snapshot")
+def test_a_persisted_scan_emits_findings_per_scan_as_emf(
+    mock_download, mock_tfsec, mock_checkov, mock_write, capsys
+):
+    """Spec §4.1's findings-per-scan metric, as one Embedded Metric Format
+    line on stdout. Printed rather than logged: Lambda prefixes logger output
+    and EMF needs the whole event to be the JSON."""
+    mock_download.return_value = ["main.tf"]
+    mock_tfsec.return_value = ([{
+        "long_id": "aws-s3-enable-bucket-encryption",
+        "location": {"filename": "main.tf", "start_line": 1, "end_line": 3},
+        "severity": "HIGH",
+    }] * 3, [])
+    mock_checkov.return_value = _checkov_report(parsing_errors=["broken.tf"])
+
+    handler.handler({"pr_id": "pr-1", "s3_prefix": "scans/pr-1/"}, None)
+
+    records = _emf_lines(capsys.readouterr().out)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["FindingsPerScan"] == 3
+    assert rec["ScanParseErrors"] == 1
+    assert rec["Environment"] == handler.ENVIRONMENT
+    assert rec["pr_id"] == "pr-1"
+
+
+@patch.object(handler, "_write_findings")
+@patch.object(handler, "_run_checkov")
+@patch.object(handler, "_run_tfsec")
+@patch.object(handler, "_download_snapshot")
+def test_a_self_check_scan_emits_no_metric(
+    mock_download, mock_tfsec, mock_checkov, mock_write, capsys
+):
+    """persist=False is a rescan of one patched file for a self-check, not a
+    scan of a PR. Counting it would make every remediation run look like a
+    burst of tiny scans."""
+    mock_download.return_value = ["main.tf"]
+    mock_tfsec.return_value = ([], [])
+    mock_checkov.return_value = _checkov_report()
+
+    handler.handler({"pr_id": "pr-1", "s3_prefix": "fixes/pr-1/f1/", "persist": False}, None)
+
+    assert _emf_lines(capsys.readouterr().out) == []
 
 
 @patch.object(handler, "_write_findings")

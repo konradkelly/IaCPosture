@@ -35,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -47,6 +48,8 @@ TFSEC_BIN = "/opt/bin/tfsec"
 LAYER_PYTHON_PATH = "/opt/python"
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "unknown")
+METRIC_NAMESPACE = "IaCPosture"
 # Checkov's own import is the dominant cost here, not the scan itself: it eagerly
 # loads its full multi-framework check registry (~50-100s cold-start observed in
 # testing), separate from the Lambda's own init phase. TODO: switch to importing
@@ -114,6 +117,17 @@ def handler(event, context):
         if persist:
             _write_findings(findings)
 
+        # Spec §4.1's findings-per-scan metric. Self-checks are excluded by
+        # the persist flag: a rescan of one patched file is not a scan of a
+        # PR, and counting it would make every remediation run look like a
+        # burst of tiny scans.
+        if persist:
+            _emit_metrics(
+                {"FindingsPerScan": len(findings), "ScanParseErrors": len(scan_errors)},
+                {"Environment": ENVIRONMENT},
+                pr_id=pr_id, event="scan_complete",
+            )
+
         return {
             "pr_id": pr_id,
             "finding_count": len(findings),
@@ -122,6 +136,32 @@ def handler(event, context):
         }
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _emit_metrics(metrics, dimensions, **context):
+    """Publish CloudWatch metrics by printing one Embedded Metric Format line.
+
+    print(), not logger: Lambda prefixes logger output with level, timestamp
+    and request id, and EMF needs the whole log event to be the JSON object.
+    CloudWatch extracts the metrics from the log stream, so this costs no IAM,
+    no SDK call, and no extra latency -- and the line doubles as a structured
+    record of the run. Namespace and dimension names are the contract with
+    terraform/observability.tf; metric names are the contract with anyone
+    graphing them.
+    """
+    print(json.dumps({
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": METRIC_NAMESPACE,
+                "Dimensions": [sorted(dimensions)],
+                "Metrics": [{"Name": name, "Unit": "Count"} for name in metrics],
+            }],
+        },
+        **dimensions,
+        **metrics,
+        **context,
+    }))
 
 
 def _download_snapshot(bucket, prefix, dest_dir):
