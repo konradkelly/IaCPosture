@@ -31,6 +31,31 @@ v1.28.14, as packaged in `layers/`.
 
 Both clean controls raised nothing.
 
+## Mapping coverage
+
+The same run also reports what fraction of findings have a candidate control
+in `rule_mappings.json` — spec §7.1's second half. Read from the file rather
+than from a `mapping-agent` run: it is a property of the corpus, costs
+nothing, and is deterministic.
+
+| | coverage |
+|---|---|
+| labelled pairs that fired | **44/61 — 72%** |
+| all distinct rules fired | **48/123 — 39%** |
+
+Two numbers because they answer different questions. The first is comparable
+with detection recall above. The second is the honest one for a real PR: the
+labels are a deliberate *minimum*, so 40 cases written to catch 67 specific
+pairs actually raise 123 distinct rules, and a reviewer's queue reflects the
+123. Most of the long tail is rules no case was written for —
+`aws-rds-enable-performance-insights`, `aws-eks-enable-control-plane-logging`,
+RDS backup retention — which are real findings with no control in the three
+frameworks loaded.
+
+It measures whether a finding *can* be mapped, not whether the agent picks
+well among the candidates. That would need a labelled expected control per
+case and a live run, and is not measured.
+
 ### The two misses are real, and each names a specific gap
 
 **`CKV_AWS_60` on `iam-role-assumable-by-anyone`.** The check
