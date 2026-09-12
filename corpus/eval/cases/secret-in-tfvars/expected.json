@@ -4,8 +4,8 @@
   "expected": [
     {
       "source": "checkov",
-      "rule_id": "CKV_SECRET_10"
+      "rule_id": "CKV_SECRET_6"
     }
   ],
-  "note": "The realistic form of the hardcoded-secrets goal: main.tf is clean, the literal is in the .tfvars that was never in the snapshot until 2026-09-12. CKV_SECRET_10 is detect-secrets' Secret Keyword plugin, which matches `password = \"...\"` assignments; labelled from checkov's SECRET_TYPE_TO_ID and left to the run to confirm."
+  "note": "Tests the .tfvars surface, so the value is one the detector can see: base64-charset only, no punctuation. checkov's secret detection is EntropyKeywordCombinator: a keyword match must combine with a detect-secrets entropy scanner hit on the value, and those scanners match a quoted run of their charset only -- base64 (A-Za-z0-9+/=) or hex. The regex is `(['\":=])\\s*([<charset>]+)(['\"]|$)`, so a value containing any other character has no token to score. See rds-literal-password for the punctuation gap."
 }

@@ -195,6 +195,9 @@ def test_checkov_runs_the_secrets_framework_too(mock_run):
 
     argv = mock_run.call_args.args[0]
     assert argv[argv.index("--framework") + 1] == "terraform,secrets"
+    # Without this the secrets runner skips .tfvars: it is not on checkov's
+    # SUPPORTED_FILE_EXTENSIONS, and that is where the passwords are.
+    assert "--enable-secret-scan-all-files" in argv
 
 
 # ---------- parse errors ----------

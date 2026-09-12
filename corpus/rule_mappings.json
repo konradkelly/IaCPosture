@@ -173,6 +173,26 @@
         "control_id": "CNAS-1"
       }
     ],
+    "checkov:CKV_SECRET_2": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-5"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-6"
+      }
+    ],
+    "checkov:CKV_SECRET_6": [
+      {
+        "framework": "OWASP-CloudNative",
+        "control_id": "CNAS-5"
+      },
+      {
+        "framework": "OWASP-CICD-Top10",
+        "control_id": "CICD-SEC-6"
+      }
+    ],
     "checkov:CKV_TF_1": [
       {
         "framework": "OWASP-CloudNative",

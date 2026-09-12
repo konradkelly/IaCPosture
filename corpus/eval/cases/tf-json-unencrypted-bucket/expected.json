@@ -3,13 +3,9 @@
   "category": "missing-encryption",
   "expected": [
     {
-      "source": "checkov",
-      "rule_id": "CKV_AWS_145"
-    },
-    {
       "source": "tfsec",
       "rule_id": "aws-s3-enable-bucket-encryption"
     }
   ],
-  "note": "Proves .tf.json is in the snapshot and both tools parse it. Same expected pair as s3-no-encryption; if this case misses while that one hits, the surface is the problem, not the rule."
+  "note": "Proves .tf.json is in the snapshot. tfsec parses it; checkov 3.3.16 does not scan .tf.json on a directory walk -- terraform/tf_parser.py:580 carries `# TODO: add support for .tf.json` -- so CKV_AWS_145 is dropped from the label as a tool gap, the same way aws_instance is tfsec-blind for public IPs."
 }

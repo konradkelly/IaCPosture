@@ -5,6 +5,11 @@
     {
       "source": "checkov",
       "rule_id": "CKV_AWS_41"
+    },
+    {
+      "source": "checkov",
+      "rule_id": "CKV_SECRET_2"
     }
-  ]
+  ],
+  "note": "CKV_SECRET_2 (AWS Access Key) added after the secrets framework went live 2026-09-12: detect-secrets' AWSKeyDetector matches the AKIA... pattern."
 }
